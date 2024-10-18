@@ -108,6 +108,7 @@ _deps = [
     "isort>=5.5.4",
     "jax>=0.4.1",
     "jaxlib>=0.4.1",
+    "mlx",
     "Jinja2",
     "k-diffusion>=0.0.12",
     "torchsde",
@@ -235,8 +236,13 @@ if os.name == "nt":  # windows
 else:
     extras["flax"] = deps_list("jax", "jaxlib", "flax")
 
+if sys.platform == "darwin" and os.uname().machine == "arm64":  # Apple Silicon
+    extras["mlx"] = deps_list("mlx")
+else:
+    extras["mlx"] = []
+
 extras["dev"] = (
-    extras["quality"] + extras["test"] + extras["training"] + extras["docs"] + extras["torch"] + extras["flax"]
+    extras["quality"] + extras["test"] + extras["training"] + extras["docs"] + extras["torch"] + extras["flax"] + extras["mlx"]
 )
 
 install_requires = [
@@ -255,7 +261,7 @@ version_range_max = max(sys.version_info[1], 10) + 1
 setup(
     name="diffusers",
     version="0.31.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
-    description="State-of-the-art diffusion in PyTorch and JAX.",
+    description="State-of-the-art diffusion in PyTorch, JAX and MLX.",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     keywords="deep learning diffusion jax pytorch stable diffusion audioldm",

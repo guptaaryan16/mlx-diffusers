@@ -7,6 +7,7 @@ from .utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
     is_flax_available,
+    is_mlx_available,
     is_k_diffusion_available,
     is_librosa_available,
     is_note_seq_available,
@@ -35,6 +36,7 @@ _import_structure = {
     "utils": [
         "OptionalDependencyNotAvailable",
         "is_flax_available",
+        "is_mlx_available",
         "is_inflect_available",
         "is_invisible_watermark_available",
         "is_k_diffusion_available",
@@ -518,6 +520,26 @@ else:
             "FlaxStableDiffusionXLPipeline",
         ]
     )
+
+try:
+    if not is_mlx_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from .utils import dummy_mlx_objects  # noqa F403
+
+    _import_structure["utils.dummy_mlx_objects"] = [
+        name for name in dir(dummy_mlx_objects) if not name.startswith("_")
+    ]
+
+
+else:
+    _import_structure["schedulers"].extend(
+        [
+            "MLXDDPMScheduler",
+            "MLXEulerDiscreteScheduler",
+        ]
+    )
+
 
 try:
     if not (is_note_seq_available()):
