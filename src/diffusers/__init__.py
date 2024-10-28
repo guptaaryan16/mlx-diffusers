@@ -511,6 +511,7 @@ except OptionalDependencyNotAvailable:
 
 
 else:
+    _import_structure["models.vae_mlx"] = ["MLXAutoencoderKL"]
     _import_structure["pipelines"].extend(
         [
             "FlaxStableDiffusionControlNetPipeline",

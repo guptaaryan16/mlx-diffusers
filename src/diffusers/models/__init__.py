@@ -18,6 +18,7 @@ from ..utils import (
     DIFFUSERS_SLOW_IMPORT,
     _LazyModule,
     is_flax_available,
+    is_mlx_available,
     is_torch_available,
 )
 
@@ -72,6 +73,10 @@ if is_flax_available():
     _import_structure["controlnet_flax"] = ["FlaxControlNetModel"]
     _import_structure["unets.unet_2d_condition_flax"] = ["FlaxUNet2DConditionModel"]
     _import_structure["vae_flax"] = ["FlaxAutoencoderKL"]
+
+if is_mlx_available():
+    _import_structure["unets.unet_2d_condition_mlx"] = ["MLXUNet2DConditionModel"]
+    _import_structure["vae_mlx"] = ["MLXAutoencoderKL"]
 
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
@@ -130,6 +135,10 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .controlnet_flax import FlaxControlNetModel
         from .unets import FlaxUNet2DConditionModel
         from .vae_flax import FlaxAutoencoderKL
+
+    if is_mlx_available():
+        from .unets import MLXUNet2DConditionModel
+        from .vae_mlx import MLXAutoencoderKL
 
 else:
     import sys
