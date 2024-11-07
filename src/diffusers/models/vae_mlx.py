@@ -15,19 +15,17 @@
 # MLX implementation of VQGAN from taming-transformers https://github.com/CompVis/taming-transformers using JAX and pytorch API of diffusers
 # API inspired from https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/
 
-import math
-from functools import partial
-from typing import Tuple, Optional
+from typing import Tuple
 from dataclasses import dataclass
 
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
+import math
 
-from ..configuration_utils import ConfigMixin, mlx_register_to_config
+from ..configuration_utils import ConfigMixin, register_to_config
 from ..utils import BaseOutput
 from .modeling_mlx_utils import MLXModelMixin
-
+from .resnet_mlx import MLXResnetBlock2D, MLXUpsample2D, MLXDownsample2D, upsample_nearest
 
 @dataclass
 class MLXDecoderOutput(BaseOutput):
@@ -57,165 +55,37 @@ class MLXAutoencoderKLOutput(BaseOutput):
 
     latent_dist: "MLXDiagonalGaussianDistribution"
 
-# Taken from https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/unet.py#L12
-def upsample_nearest(x, scale: int = 2):
-    B, H, W, C = x.shape
-    x = mx.broadcast_to(x[:, :, None, :, None, :], (B, H, scale, W, scale, C))
-    x = x.reshape(B, H * scale, W * scale, C)
-    return x
 
+class MLXAttention(nn.Module):
+    """A single head unmasked attention for use with the VAE."""
 
-class MLXUpsample2D(nn.Module):
-    """
-    MLX implementation of 2D upsampling layer with an optional convolution.
-
-    Parameters:
-        channels (`int`):
-            number of channels in the inputs and outputs.
-        use_conv (`bool`, default `False`):
-            option to use a convolution.
-        use_conv_transpose (`bool`, default `False`):
-            option to use a convolution transpose.
-        out_channels (`int`, optional):
-            number of output channels. Defaults to `channels`.
-        name (`str`, default `conv`):
-            name of the upsampling 2D layer.
-    """
-    def __init__(
-        self,
-        channels: int,
-        out_channels: Optional[int] = None,
-        dtype: mx.Dtype = mx.float32
-    ):
-        super().__init__()
-        self.channels = channels
-        self.out_channels = out_channels or channels
-        self.dtype = dtype
-
-        self.conv = nn.Conv2d(
-            self.in_channels,
-            self.out_channels,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding=((1, 1), (1, 1)),
-            dtype= self.dtype
-        )
-
-    def __call__(self, hidden_states):
-        batch, height, width, channels = hidden_states.shape
-        hidden_states = upsample_nearest(hidden_states, 2)
-        hidden_states = self.conv(hidden_states)
-        return hidden_states
-
-
-class MLXDownsample2D(nn.Module):
-    """
-    MLX implementation of 2D Downsample layer
-
-    Args:
-        in_channels (`int`):
-            Input channels
-        out_channels (`int`) = None:
-            Output channels
-        dtype (:obj:`mx.Dtype`, *optional*, defaults to mx.float32):
-            Parameters `dtype`
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        out_channels: Optional[int] = None,
-        dtype: mx.Dtype = mx.float32,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels or in_channels
-        self.dtype = dtype
-
-        self.conv = nn.Conv2d(
-            self.in_channels,
-            self.out_channels,
-            kernel_size=(3, 3),
-            strides=(2, 2),
-            dtype=self.dtype,
-        )
-
-    def __call__(self, hidden_states):
-        pad = ((0, 0), (0, 1), (0, 1), (0, 0))  # pad height and width dim
-        hidden_states = mx.pad(hidden_states, pad_width=pad)
-        hidden_states = self.conv(hidden_states)
-        return hidden_states
-
-
-class MLXResnetBlock2D(nn.Module):
-    """
-    MLX implementation of 2D Resnet Block.
-
-    Args:
-        Args:
-        in_channels (`int`):
-            Input channels
-        out_channels (`int`):
-            Output channels
-        dropout (:obj:`float`, *optional*, defaults to 0.0):
-            Dropout rate
-        groups (:obj:`int`, *optional*, defaults to `32`):
-            The number of groups to use for group norm.
-        use_nin_shortcut (:obj:`bool`, *optional*, defaults to `None`):
-            Whether to use `nin_shortcut`. This activates a new layer inside ResNet block
-        dtype (:obj:`mx.Dtype`, *optional*, defaults to mx.float32):
-            Parameters `dtype`
-    """
-    def __init__(
-            self,
-            in_channels: int,
-            out_channels: int = None,
-            dropout: float = 0.0,
-            groups: int = 32,
-            use_nin_shortcut: bool = None,
-            dtype: mx.Dtype = mx.float32,
-        ):
+    def __init__(self, dims: int, norm_groups: int = 32):
         super().__init__()
 
-        out_channels = out_channels or in_channels
+        self.group_norm = nn.GroupNorm(norm_groups, dims, pytorch_compatible=True)
+        self.to_q = nn.Linear(dims, dims)
+        self.to_k = nn.Linear(dims, dims)
+        self.to_v = nn.Linear(dims, dims)
+        self.to_out = nn.Linear(dims, dims)
 
-        self.norm1 = nn.GroupNorm(groups, in_channels, ep=1e-6,pytorch_compatible=True)
-        self.conv1 = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, stride=1, padding=1, dtype=dtype
-        )
+    def __call__(self, x):
+        B, H, W, C = x.shape
 
-        self.norm2 = nn.GroupNorm(groups, out_channels, eps=1e-6, pytorch_compatible=True)
-        self.conv2 = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, stride=1, padding=1, dtype=dtype
-        )
+        y = self.group_norm(x)
 
-        use_nin_shortcut = self.in_channels != out_channels if self.use_nin_shortcut is None else self.use_nin_shortcut
+        queries = self.to_q(y).reshape(B, H * W, C)
+        keys = self.to_k(y).reshape(B, H * W, C)
+        values = self.to_v(y).reshape(B, H * W, C)
 
-        self.conv_shortcut = None
-        if use_nin_shortcut:
-            self.conv_shortcut = nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=(1, 1),
-                strides=(1, 1),
-                dtype=self.dtype,
-            )
+        scale = 1 / math.sqrt(queries.shape[-1])
+        scores = (queries * scale) @ keys.transpose(0, 2, 1)
+        attn = mx.softmax(scores, axis=-1)
+        y = (attn @ values).reshape(B, H, W, C)
 
-    def __call__(self, hidden_states: mx.array, deterministic=True):
-        residual = hidden_states
-        hidden_states = self.norm1(hidden_states)
-        hidden_states = nn.silu(hidden_states)
-        hidden_states = self.conv1(hidden_states)
+        y = self.to_out(y)
+        x = x + y
 
-        hidden_states = self.norm2(hidden_states)
-        hidden_states = nn.silu(hidden_states)
-        hidden_states = self.dropout_layer(hidden_states, deterministic)
-        hidden_states = self.conv2(hidden_states)
-
-        if self.conv_shortcut is not None:
-            residual = self.conv_shortcut(residual)
-
-        return hidden_states + residual
+        return x
 
 
 class MLXDownEncoderBlock2D(nn.Module):
@@ -227,50 +97,44 @@ class MLXDownEncoderBlock2D(nn.Module):
             Input channels
         out_channels (:obj:`int`):
             Output channels
-        dropout (:obj:`float`, *optional*, defaults to 0.0):
-            Dropout rate
         num_layers (:obj:`int`, *optional*, defaults to 1):
             Number of Resnet layer block
         resnet_groups (:obj:`int`, *optional*, defaults to `32`):
             The number of groups to use for the Resnet block group norm
         add_downsample (:obj:`bool`, *optional*, defaults to `True`):
             Whether to add downsample layer
-        dtype (:obj:`mx.Dtype`, *optional*, defaults to mx.float32):
-            Parameters `dtype`
     """
-    
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        dropout: float = 0.0,
         num_layers: int = 1,
         resnet_groups: int = 32,
-        add_downsample: bool = True,
-        dtype: mx.Dtype = mx.float32,
+        add_downsample: bool = True
     ):
+        super().__init__()
+        self.add_downsample = add_downsample
         resnets = []
-        for i in range(self.num_layers):
-            in_channels = self.in_channels if i == 0 else self.out_channels
+        for i in range(num_layers):
+            in_channels = in_channels if i == 0 else out_channels
 
             res_block = MLXResnetBlock2D(
                 in_channels=in_channels,
-                out_channels=self.out_channels,
-                dropout=self.dropout,
-                groups=self.resnet_groups,
-                dtype=self.dtype,
+                out_channels=out_channels,
+                groups=resnet_groups,
             )
             resnets.append(res_block)
         self.resnets = resnets
 
         if self.add_downsample:
-            self.downsamplers_0 = MLXDownsample2D(self.out_channels, dtype=self.dtype)
+            self.downsamplers_0 = MLXDownsample2D(out_channels)
 
-    def __call__(self, hidden_states, deterministic=True):
+    def __call__(self, hidden_states):
+        
         for resnet in self.resnets:
-            hidden_states = resnet(hidden_states, deterministic=deterministic)
-
+            hidden_states = resnet(hidden_states)
         if self.add_downsample:
+            hidden_states = mx.pad(hidden_states, [(0, 0), (0, 1), (0, 1), (0, 0)])
             hidden_states = self.downsamplers_0(hidden_states)
 
         return hidden_states
@@ -293,45 +157,39 @@ class MLXUpDecoderBlock2D(nn.Module):
             The number of groups to use for the Resnet block group norm
         add_upsample (:obj:`bool`, *optional*, defaults to `True`):
             Whether to add upsample layer
-        dtype (:obj:`mx.Dtype`, *optional*, defaults to mx.float32):
-            Parameters `dtype`
     """
-
-    
-
     def __init__(
         self, 
         in_channels: int,
         out_channels: int,
-        dropout: float = 0.0,
         num_layers: int = 1,
         resnet_groups: int = 32,
         add_upsample: bool = True,
-        dtype: mx.Dtype = mx.float32,
     ):
+        super().__init__()
+        self.add_upsample = add_upsample
         resnets = []
-        for i in range(self.num_layers):
-            in_channels = self.in_channels if i == 0 else self.out_channels
+
+        for i in range(num_layers):
+            in_channels = in_channels if i == 0 else out_channels
             res_block = MLXResnetBlock2D(
                 in_channels=in_channels,
-                out_channels=self.out_channels,
-                dropout=self.dropout,
-                groups=self.resnet_groups,
-                dtype=self.dtype,
+                out_channels=out_channels,
+                groups=resnet_groups,
             )
             resnets.append(res_block)
 
         self.resnets = resnets
 
         if self.add_upsample:
-            self.upsamplers_0 = MLXUpsample2D(self.out_channels, dtype=self.dtype)
+            self.upsamplers_0 = MLXUpsample2D(out_channels, out_channels)
 
-    def __call__(self, hidden_states, deterministic=True):
+    def __call__(self, hidden_states):
         for resnet in self.resnets:
-            hidden_states = resnet(hidden_states, deterministic=deterministic)
+            hidden_states = resnet(hidden_states)
 
         if self.add_upsample:
-            hidden_states = self.upsamplers_0(hidden_states)
+            hidden_states = self.upsamplers_0(upsample_nearest(hidden_states))
 
         return hidden_states
 
@@ -343,75 +201,59 @@ class MLXUNetMidBlock2D(nn.Module):
     Parameters:
         in_channels (:obj:`int`):
             Input channels
-        dropout (:obj:`float`, *optional*, defaults to 0.0):
-            Dropout rate
         num_layers (:obj:`int`, *optional*, defaults to 1):
             Number of Resnet layer block
         resnet_groups (:obj:`int`, *optional*, defaults to `32`):
             The number of groups to use for the Resnet and Attention block group norm
         num_attention_heads (:obj:`int`, *optional*, defaults to `1`):
             Number of attention heads for each attention block
-        dtype (:obj:`mx.Dtype`, *optional*, defaults to mx.float32):
-            Parameters `dtype`
     """
-
-    
-
     def __init__(
         self,
         in_channels: int,
-        dropout: float = 0.0,
         num_layers: int = 1,
         resnet_groups: int = 32,
-        num_attention_heads: int = 1,
-        dtype: mx.Dtype = mx.float32
     ):
+        super().__init__()
         resnet_groups = (
-            self.resnet_groups
-            if self.resnet_groups is not None
-            else min(self.in_channels // 4, 32)
+            resnet_groups
+            if resnet_groups is not None
+            else min(in_channels // 4, 32)
         )
 
         # there is always at least one resnet
         resnets = [
             MLXResnetBlock2D(
-                in_channels=self.in_channels,
-                out_channels=self.in_channels,
-                dropout=self.dropout,
+                in_channels=in_channels,
+                out_channels=in_channels,
                 groups=resnet_groups,
-                dtype=self.dtype,
             )
         ]
 
         attentions = []
 
-        for _ in range(self.num_layers):
-            attn_block = MLXAttentionBlock(
-                channels=self.in_channels,
-                num_head_channels=self.num_attention_heads,
-                num_groups=resnet_groups,
-                dtype=self.dtype,
+        for _ in range(num_layers):
+            attn_block = MLXAttention(
+                dims=in_channels,
+                norm_groups=resnet_groups,
             )
             attentions.append(attn_block)
 
             res_block = MLXResnetBlock2D(
-                in_channels=self.in_channels,
-                out_channels=self.in_channels,
-                dropout=self.dropout,
-                groups=resnet_groups,
-                dtype=self.dtype,
+                in_channels=in_channels,
+                out_channels=in_channels,
+                groups=resnet_groups
             )
             resnets.append(res_block)
 
         self.resnets = resnets
         self.attentions = attentions
 
-    def __call__(self, hidden_states, deterministic=True):
-        hidden_states = self.resnets[0](hidden_states, deterministic=deterministic)
+    def __call__(self, hidden_states):
+        hidden_states = self.resnets[0](hidden_states)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
             hidden_states = attn(hidden_states)
-            hidden_states = resnet(hidden_states, deterministic=deterministic)
-
+            hidden_states = resnet(hidden_states)
         return hidden_states
 
 
@@ -432,16 +274,9 @@ class MLXEncoder(nn.Module):
             Number of Resnet layer for each block
         norm_num_groups (:obj:`int`, *optional*, defaults to `32`):
             norm num group
-        act_fn (:obj:`str`, *optional*, defaults to `silu`):
-            Activation function
         double_z (:obj:`bool`, *optional*, defaults to `False`):
             Whether to double the last output channels
-        dtype (:obj:`jnp.dtype`, *optional*, defaults to jnp.float32):
-            Parameters `dtype`
     """
-
-    
-
     def __init__(
         self, 
         in_channels: int = 3,
@@ -450,25 +285,22 @@ class MLXEncoder(nn.Module):
         block_out_channels: Tuple[int] = (64,),
         layers_per_block: int = 2,
         norm_num_groups: int = 32,
-        act_fn: str = "silu",
-        double_z: bool = False,
-        dtype: mx.Dtype = mx.float32,
+        double_z: bool = False
     ):
-        block_out_channels = self.block_out_channels
-        # in
+        super().__init__()
+        
         self.conv_in = nn.Conv2d(
+            in_channels,
             block_out_channels[0],
-            block_out_channels[0],
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding=((1, 1), (1, 1)),
-            dtype=self.dtype,
+            kernel_size=3,
+            stride=1,
+            padding=1
         )
 
         # downsampling
         down_blocks = []
         output_channel = block_out_channels[0]
-        for i, _ in enumerate(self.down_block_types):
+        for i, _ in enumerate(down_block_types):
             input_channel = output_channel
             output_channel = block_out_channels[i]
             is_final_block = i == len(block_out_channels) - 1
@@ -476,10 +308,9 @@ class MLXEncoder(nn.Module):
             down_block = MLXDownEncoderBlock2D(
                 in_channels=input_channel,
                 out_channels=output_channel,
-                num_layers=self.layers_per_block,
-                resnet_groups=self.norm_num_groups,
-                add_downsample=not is_final_block,
-                dtype=self.dtype,
+                num_layers=layers_per_block,
+                resnet_groups=norm_num_groups,
+                add_downsample=not is_final_block
             )
             down_blocks.append(down_block)
         self.down_blocks = down_blocks
@@ -487,35 +318,32 @@ class MLXEncoder(nn.Module):
         # middle
         self.mid_block = MLXUNetMidBlock2D(
             in_channels=block_out_channels[-1],
-            resnet_groups=self.norm_num_groups,
-            num_attention_heads=None,
-            dtype=self.dtype,
+            resnet_groups=norm_num_groups
         )
 
         # end
         conv_out_channels = (
-            2 * self.out_channels if self.double_z else self.out_channels
+            2 * out_channels if double_z else out_channels
         )
-        self.conv_norm_out = nn.GroupNorm(num_groups=self.norm_num_groups, epsilon=1e-6)
+        self.conv_norm_out = nn.GroupNorm(num_groups=norm_num_groups, dims=block_out_channels[-1], pytorch_compatible=True)
         self.conv_out = nn.Conv2d(
+            block_out_channels[-1],
             conv_out_channels,
-            conv_out_channels,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding=((1, 1), (1, 1)),
-            dtype=self.dtype,
+            kernel_size=3,
+            stride=1,
+            padding=1
         )
 
-    def __call__(self, sample, deterministic: bool = True):
+    def __call__(self, sample):
         # in
         sample = self.conv_in(sample)
 
         # downsampling
         for block in self.down_blocks:
-            sample = block(sample, deterministic=deterministic)
+            sample = block(sample)
 
         # middle
-        sample = self.mid_block(sample, deterministic=deterministic)
+        sample = self.mid_block(sample)
 
         # end
         sample = self.conv_norm_out(sample)
@@ -542,14 +370,7 @@ class MLXDecoder(nn.Module):
             Number of Resnet layer for each block
         norm_num_groups (:obj:`int`, *optional*, defaults to `32`):
             norm num group
-        act_fn (:obj:`str`, *optional*, defaults to `silu`):
-            Activation function
-        double_z (:obj:`bool`, *optional*, defaults to `False`):
-            Whether to double the last output channels
-        dtype (:obj:`mx.dtype`, *optional*, defaults to mx.float32):
-            parameters `dtype`
     """
-
     def __init__(
         self,
         in_channels: int = 3,
@@ -558,34 +379,28 @@ class MLXDecoder(nn.Module):
         block_out_channels: int = (64,),
         layers_per_block: int = 2,
         norm_num_groups: int = 32,
-        act_fn: str = "silu",
-        dtype: mx.Dtype = mx.float32
     ):
-        block_out_channels = self.block_out_channels
-
+        super().__init__()
         # z to block_in
         self.conv_in = nn.Conv2d(
+            in_channels,
             block_out_channels[-1],
-            block_out_channels[-1],
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding=((1, 1), (1, 1)),
-            dtype=self.dtype,
+            kernel_size=3,
+            stride=1,
+            padding=1
         )
 
         # middle
         self.mid_block = MLXUNetMidBlock2D(
             in_channels=block_out_channels[-1],
-            resnet_groups=self.norm_num_groups,
-            num_attention_heads=None,
-            dtype=self.dtype,
+            resnet_groups=norm_num_groups,
         )
 
         # upsampling
         reversed_block_out_channels = list(reversed(block_out_channels))
         output_channel = reversed_block_out_channels[0]
         up_blocks = []
-        for i, _ in enumerate(self.up_block_types):
+        for i, _ in enumerate(up_block_types):
             prev_output_channel = output_channel
             output_channel = reversed_block_out_channels[i]
 
@@ -594,10 +409,9 @@ class MLXDecoder(nn.Module):
             up_block = MLXUpDecoderBlock2D(
                 in_channels=prev_output_channel,
                 out_channels=output_channel,
-                num_layers=self.layers_per_block + 1,
-                resnet_groups=self.norm_num_groups,
-                add_upsample=not is_final_block,
-                dtype=self.dtype,
+                num_layers=layers_per_block + 1,
+                resnet_groups=norm_num_groups,
+                add_upsample=not is_final_block
             )
             up_blocks.append(up_block)
             prev_output_channel = output_channel
@@ -605,26 +419,25 @@ class MLXDecoder(nn.Module):
         self.up_blocks = up_blocks
 
         # end
-        self.conv_norm_out = nn.GroupNorm(num_groups=self.norm_num_groups, epsilon=1e-6)
+        self.conv_norm_out = nn.GroupNorm(num_groups=norm_num_groups, dims=block_out_channels[0], pytorch_compatible=True)
         self.conv_out = nn.Conv2d(
-            self.out_channels,
-            self.out_channels,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding=((1, 1), (1, 1)),
-            dtype=self.dtype,
+            block_out_channels[0], 
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1
         )
 
-    def __call__(self, sample, deterministic: bool = True):
+    def __call__(self, sample):
         # z to block_in
         sample = self.conv_in(sample)
 
         # middle
-        sample = self.mid_block(sample, deterministic=deterministic)
+        sample = self.mid_block(sample)
 
         # upsampling
         for block in self.up_blocks:
-            sample = block(sample, deterministic=deterministic)
+            sample = block(sample)
 
         sample = self.conv_norm_out(sample)
         sample = nn.silu(sample)
@@ -679,8 +492,7 @@ class MLXDiagonalGaussianDistribution(object):
         return self.mean
 
 
-@mlx_register_to_config
-class MLXAutoencoderKL(nn.Module, MLXModelMixin, ConfigMixin):
+class MLXAutoencoderKL(MLXModelMixin, ConfigMixin):
     r"""
     MLX implementation of a VAE model with KL loss for decoding latent representations.
 
@@ -700,8 +512,6 @@ class MLXAutoencoderKL(nn.Module, MLXModelMixin, ConfigMixin):
             Tuple of block output channels.
         layers_per_block (`int`, *optional*, defaults to `2`):
             Number of ResNet layer for each block.
-        act_fn (`str`, *optional*, defaults to `silu`):
-            The activation function to use.
         latent_channels (`int`, *optional*, defaults to `4`):
             Number of channels in the latent space.
         norm_num_groups (`int`, *optional*, defaults to `32`):
@@ -715,10 +525,8 @@ class MLXAutoencoderKL(nn.Module, MLXModelMixin, ConfigMixin):
             diffusion model. When decoding, the latents are scaled back to the original scale with the formula: `z = 1
             / scaling_factor * z`. For more details, refer to sections 4.3.2 and D.1 of the [High-Resolution Image
             Synthesis with Latent Diffusion Models](https://arxiv.org/abs/2112.10752) paper.
-        dtype (`mx.Dtype`, *optional*, defaults to `mx.float32`):
-            The `dtype` of the parameters.
     """
-
+    @register_to_config
     def __init__(
         self,
         in_channels: int = 3,
@@ -727,88 +535,67 @@ class MLXAutoencoderKL(nn.Module, MLXModelMixin, ConfigMixin):
         up_block_types: Tuple[str] = ("UpDecoderBlock2D",),
         block_out_channels: Tuple[int] = (64,),
         layers_per_block: int = 1,
-        act_fn: str = "silu",
         latent_channels: int = 4,
         norm_num_groups: int = 32,
         sample_size: int = 32,
-        scaling_factor: float = 0.18215,
-        dtype: mx.Dtype = mx.float32
+        scaling_factor: float = 0.18215
     ):
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.down_block_types = down_block_types
-        self.up_block_types = up_block_types
-        self.block_out_channels = block_out_channels
-        self.layers_per_block = layers_per_block
-        self.act_fn = act_fn
+        super().__init__()
         self.latent_channels = latent_channels
-        self.norm_num_groups = norm_num_groups
-        self.sample_size = sample_size
-        self.scaling_factor = scaling_factor
-        self.dtype = dtype
 
         self.encoder = MLXEncoder(
-            in_channels=config.in_channels,
-            out_channels=config.latent_channels,
-            down_block_types=config.down_block_types,
-            block_out_channels=config.block_out_channels,
-            layers_per_block=config.layers_per_block,
-            act_fn=config.act_fn,
-            norm_num_groups=config.norm_num_groups,
+            in_channels=in_channels,
+            out_channels=latent_channels,
+            down_block_types=down_block_types,
+            block_out_channels=block_out_channels,
+            layers_per_block=layers_per_block,
+            norm_num_groups=norm_num_groups,
             double_z=True,
-            dtype=dtype,
         )
         self.decoder = MLXDecoder(
-            in_channels=config.latent_channels,
-            out_channels=config.out_channels,
-            up_block_types=config.up_block_types,
-            block_out_channels=config.block_out_channels,
-            layers_per_block=config.layers_per_block,
-            norm_num_groups=config.norm_num_groups,
-            act_fn=config.act_fn,
-            dtype=dtype,
+            in_channels=latent_channels,
+            out_channels=out_channels,
+            up_block_types=up_block_types,
+            block_out_channels=block_out_channels,
+            layers_per_block=layers_per_block,
+            norm_num_groups=norm_num_groups,
         )
-        self.quant_conv = nn.Conv(
-            2 * config.latent_channels,
-            kernel_size=(1, 1),
-            strides=(1, 1),
-            dtype=dtype,
+        self.quant_conv = nn.Conv2d(
+            2 * latent_channels,
+            2 * latent_channels,
+            kernel_size=1,
+            stride=1,
         )
-        self.post_quant_conv = nn.Conv(
-            config.latent_channels,
-            kernel_size=(1, 1),
-            strides=(1, 1),
-            dtype=dtype,
+        self.post_quant_conv = nn.Conv2d(
+            latent_channels,
+            latent_channels,
+            kernel_size=1,
+            stride=1,
         )
 
-    def init_weights(self, rng: Optional[mx.array, int]):
+    def init_weights(self):
         # init input tensors
-        sample_shape = (1, self.in_channels, self.sample_size, self.sample_size)
-        sample = mx.zeros(sample_shape, dtype=mx.float32)
-
-        params_rng, dropout_rng, gaussian_rng = mx.random.split(rng, 3)
-        rngs = {"params": params_rng, "dropout": dropout_rng, "gaussian": gaussian_rng}
-
-        return self.init(rngs, sample)["params"]
+        init_fn = nn.init.uniform()
+        self.apply(init_fn)
 
     def encode(self, sample, deterministic: bool = True, return_dict: bool = True):
         sample = mx.transpose(sample, (0, 2, 3, 1))
 
-        hidden_states = self.encoder(sample, deterministic=deterministic)
-        moments = self.quant_conv(hidden_states)
-        posterior = MLXDiagonalGaussianDistribution(moments)
+        hidden_states = self.encoder(sample)
 
+        moments = self.quant_conv(hidden_states)
+        posterior = MLXDiagonalGaussianDistribution(moments, deterministic=deterministic)
         if not return_dict:
             return (posterior,)
 
         return MLXAutoencoderKLOutput(latent_dist=posterior)
 
     def decode(self, latents, deterministic: bool = True, return_dict: bool = True):
-        if latents.shape[-1] != self.config.latent_channels:
-            latents = jnp.transpose(latents, (0, 2, 3, 1))
+        if latents.shape[-1] != self.latent_channels:
+            latents = mx.transpose(latents, (0, 2, 3, 1))
 
         hidden_states = self.post_quant_conv(latents)
-        hidden_states = self.decoder(hidden_states, deterministic=deterministic)
+        hidden_states = self.decoder(hidden_states)
 
         hidden_states = mx.transpose(hidden_states, (0, 3, 1, 2))
 
@@ -828,7 +615,7 @@ class MLXAutoencoderKL(nn.Module, MLXModelMixin, ConfigMixin):
             sample, deterministic=deterministic, return_dict=return_dict
         )
         if sample_posterior:
-            rng = self.make_rng("gaussian")
+            rng = mx.random.normal()
             hidden_states = posterior.latent_dist.sample(rng)
         else:
             hidden_states = posterior.latent_dist.mode()

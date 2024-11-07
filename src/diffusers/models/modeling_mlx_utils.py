@@ -14,21 +14,10 @@
 # limitations under the License.
 
 import os
-from pickle import UnpicklingError
 from typing import Any, Dict, Union
 
 import mlx.core as mx
 import mlx.nn as nn
-
-import jax
-import jax.numpy as jnp
-import msgpack.exceptions
-from flax.core.frozen_dict import FrozenDict, unfreeze
-
-
-from flax.serialization import from_bytes, to_bytes
-
-from flax.traverse_util import flatten_dict, unflatten_dict
 
 from mlx.nn.utils import tree_flatten, tree_unflatten
 from huggingface_hub import create_repo, hf_hub_download
@@ -40,23 +29,21 @@ from huggingface_hub.utils import (
 )
 from requests import HTTPError
 
-from .. import __version__, is_torch_available
+from .. import __version__
 from ..utils import (
     CONFIG_NAME,
-    SAFETENSORS_WEIGHTS_NAME,
     MLX_WEIGHTS_NAME,
     HUGGINGFACE_CO_RESOLVE_ENDPOINT,
     WEIGHTS_NAME,
     PushToHubMixin,
     logging,
 )
-from .modeling_mlx_pytorch_utils import convert_pytorch_state_dict_to_mlx
 
 
 logger = logging.get_logger(__name__)
 
 # Inspired from https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/model_io.py
-class MLXModelMixin(PushToHubMixin):
+class MLXModelMixin(nn.Module, PushToHubMixin):
     r"""
     Base class for all MLX models.
 
@@ -68,7 +55,7 @@ class MLXModelMixin(PushToHubMixin):
 
     config_name = CONFIG_NAME
     _automatically_saved_args = ["_diffusers_version", "_class_name", "_name_or_path"]
-    _mlx_internal_args = ["name", "parent", "dtype"]
+    _mlx_internal_args = []
 
     @classmethod
     def _from_config(cls, config, **kwargs):
@@ -76,143 +63,9 @@ class MLXModelMixin(PushToHubMixin):
         All context managers that the model should be initialized under go here.
         """
         return cls(config, **kwargs)
-
-    # Used https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/model_io.py
-    def _cast_floating_to(
-        self, params: Union[Dict], dtype: mx.Dtype, mask: Any = None
-    ) -> Any:
-        """
-        Helper method to cast floating-point values of given parameter `PyTree` to given `dtype`.
-        """
-
-        def conditional_cast(param):
-            if isinstance(param, mx.array) and mx.issubdtype(
-                param.dtype, mx.floating
-            ):
-                param = param.astype(dtype)
-            return param
-
-        if mask is None:
-            return nn.apply(conditional_cast, params)        
-        flat_params = flax.linen.flatten_dict(params)
-        flat_mask, _ = jax.tree_flatten(mask)
-
-        for masked, key in zip(flat_mask, flat_params.keys()):
-            if masked:
-                param = flat_params[key]
-                flat_params[key] = conditional_cast(param)
-
-        return unflatten_dict(flat_params)
-
-    def to_bf16(self, params: Union[Dict, FrozenDict], mask: Any = None):
-        r"""
-        Cast the floating-point `params` to `mx.bfloat16`. This returns a new `params` tree and does not cast
-        the `params` in place.
-
-        This method can be used on a TPU to explicitly convert the model parameters to bfloat16 precision to do full
-        half-precision training or to save weights in bfloat16 for inference in order to save memory and improve speed.
-
-        Arguments:
-            params (`Union[Dict, FrozenDict]`):
-                A `PyTree` of model parameters.
-            mask (`Union[Dict, FrozenDict]`):
-                A `PyTree` with same structure as the `params` tree. The leaves should be booleans. It should be `True`
-                for params you want to cast, and `False` for those you want to skip.
-
-        Examples:
-
-        ```python
-        >>> from diffusers import MLXUNet2DConditionModel
-
-        >>> # load model
-        >>> model, params = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
-        >>> # By default, the model parameters will be in fp32 precision, to cast these to bfloat16 precision
-        >>> params = model.to_bf16(params)
-        >>> # If you don't want to cast certain parameters (for example layer norm bias and scale)
-        >>> # then pass the mask as follows
-        >>> from flax import traverse_util
-
-        >>> model, params = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
-        >>> flat_params = traverse_util.flatten_dict(params)
-        >>> mask = {
-        ...     path: (path[-2] != ("LayerNorm", "bias") and path[-2:] != ("LayerNorm", "scale"))
-        ...     for path in flat_params
-        ... }
-        >>> mask = traverse_util.unflatten_dict(mask)
-        >>> params = model.to_bf16(params, mask)
-        ```"""
-        return self._cast_floating_to(params, mx.bfloat16, mask)
-
-    def to_fp32(self, params: Union[Dict, FrozenDict], mask: Any = None):
-        r"""
-        Cast the floating-point `params` to `mx.float32`. This method can be used to explicitly convert the
-        model parameters to fp32 precision. This returns a new `params` tree and does not cast the `params` in place.
-
-        Arguments:
-            params (`Union[Dict, FrozenDict]`):
-                A `PyTree` of model parameters.
-            mask (`Union[Dict, FrozenDict]`):
-                A `PyTree` with same structure as the `params` tree. The leaves should be booleans. It should be `True`
-                for params you want to cast, and `False` for those you want to skip.
-
-        Examples:
-
-        ```python
-        >>> from diffusers import MLXUNet2DConditionModel
-
-        >>> # Download model and configuration from huggingface.co
-        >>> model, params = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
-        >>> # By default, the model params will be in fp32, to illustrate the use of this method,
-        >>> # we'll first cast to fp16 and back to fp32
-        >>> params = model.to_f16(params)
-        >>> # now cast back to fp32
-        >>> params = model.to_fp32(params)
-        ```"""
-        return self._cast_floating_to(params, mx.float32, mask)
-
-    def to_fp16(self, params: Union[Dict, FrozenDict], mask: Any = None):
-        r"""
-        Cast the floating-point `params` to `mxfloat16`. This returns a new `params` tree and does not cast the
-        `params` in place.
-
-        This method can be used on a GPU to explicitly convert the model parameters to float16 precision to do full
-        half-precision training or to save weights in float16 for inference in order to save memory and improve speed.
-
-        Arguments:
-            params (`Union[Dict, FrozenDict]`):
-                A `PyTree` of model parameters.
-            mask (`Union[Dict, FrozenDict]`):
-                A `PyTree` with same structure as the `params` tree. The leaves should be booleans. It should be `True`
-                for params you want to cast, and `False` for those you want to skip.
-
-        Examples:
-
-        ```python
-        >>> from diffusers import MLXUNet2DConditionModel
-
-        >>> # load model
-        >>> model, params = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
-        >>> # By default, the model params will be in fp32, to cast these to float16
-        >>> params = model.to_fp16(params)
-        >>> # If you want don't want to cast certain parameters (for example layer norm bias and scale)
-        >>> # then pass the mask as follows
-        >>> from flax import traverse_util
-
-        >>> model, params = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
-        >>> flat_params = traverse_util.flatten_dict(params)
-        >>> mask = {
-        ...     path: (path[-2] != ("LayerNorm", "bias") and path[-2:] != ("LayerNorm", "scale"))
-        ...     for path in flat_params
-        ... }
-        >>> mask = traverse_util.unflatten_dict(mask)
-        >>> params = model.to_fp16(params, mask)
-        ```"""
-        return self._cast_floating_to(params, mx.float16, mask)
-
-    def init_weights(self, rng: jax.Array) -> Dict:
-        raise NotImplementedError(
-            f"init_weights method has to be implemented for {self}"
-        )
+    
+    def __init__(self):
+        super().__init__() 
 
     @classmethod
     @validate_hf_hub_args
@@ -274,9 +127,9 @@ class MLXModelMixin(PushToHubMixin):
         >>> from diffusers import MLXUNet2DConditionModel
 
         >>> # Download model and configuration from huggingface.co and cache.
-        >>> model, params = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
+        >>> model = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
         >>> # Model was saved using *save_pretrained('./test/saved_model/')* (for example purposes, not runnable).
-        >>> model, params = MLXUNet2DConditionModel.from_pretrained("./test/saved_model/")
+        >>> model = MLXUNet2DConditionModel.from_pretrained("./test/saved_model/")
         ```
 
         If you get the error message below, you need to finetune the weights for your downstream task:
@@ -409,38 +262,15 @@ class MLXModelMixin(PushToHubMixin):
                     f"Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a directory "
                     f"containing a file named {MLX_WEIGHTS_NAME} or {WEIGHTS_NAME}."
                 )
+        # Used https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/base.py
+        # Didn't use mlx.nn.Module.load_weights method directly for enhanced debugging within the diffusers library
+        state = list(mx.load(model_file).items())
+        
+        required_params = dict(tree_flatten(model.parameters()))
 
-        if from_pt:
-            if is_torch_available():
-                from .modeling_utils import load_state_dict
-            else:
-                raise EnvironmentError(
-                    "Can't load the model in PyTorch format because PyTorch is not installed. "
-                    "Please, install PyTorch or use native Flax weights."
-                )
-            
-            # Step 1: Get the pytorch file
-            pytorch_model_file = load_state_dict(model_file)
-
-            # Step 2: Convert the weights
-            # TODO: Implement this functions 
-            state = convert_pytorch_state_dict_to_mlx(pytorch_model_file, model)
-        else:
-            state = mx.load(model_file)
-
-        # flatten dicts
-        state = tree_flatten(state)
-
-        params_shape_tree = jax.eval_shape(
-            model.init_weights, rng=jax.random.PRNGKey(0)
-        )
-        required_params = set(flatten_dict(unfreeze(params_shape_tree)).keys())
-
-        shape_state = flatten_dict(unfreeze(params_shape_tree))
-
-        missing_keys = required_params - set(state.keys())
-        unexpected_keys = set(state.keys()) - required_params
-
+        unexpected_keys = (state.keys() - required_params.keys())
+        missing_keys = (required_params.keys() - state.keys())
+    
         if missing_keys:
             logger.warning(
                 f"The checkpoint {pretrained_model_name_or_path} is missing required keys: {missing_keys}. "
@@ -448,11 +278,17 @@ class MLXModelMixin(PushToHubMixin):
             )
             cls._missing_keys = missing_keys
 
-        for key in state.keys():
-            if key in shape_state and state[key].shape != shape_state[key].shape:
+        for key in required_params.keys():
+            v_new = state[key]
+            if not isinstance(v_new, mx.array):
+                raise ValueError(
+                    "Expected mx.array but received "
+                    f"{type(v_new)} for parameter {key}"
+                ) 
+            if key in required_params and required_params[key].shape != state[key].shape:
                 raise ValueError(
                     f"Trying to load the pretrained weight for {key} failed: checkpoint has shape "
-                    f"{state[key].shape} which is incompatible with the model shape {shape_state[key].shape}. "
+                    f"{state[key].shape} which is incompatible with the model shape {required_params[key].shape}. "
                 )
 
         # remove unexpected keys to not be saved again
@@ -484,13 +320,18 @@ class MLXModelMixin(PushToHubMixin):
                 f" was trained on, you can already use {model.__class__.__name__} for predictions without further"
                 " training."
             )
+        
+        model.update(tree_unflatten(state))
+        
+        # Eval the weights due to lazy loading in MLX
+        mx.eval(model.parameters())
+        model.eval()
 
-        return model, tree_unflatten(state)
+        return model
 
     def save_pretrained(
         self,
         save_directory: Union[str, os.PathLike],
-        params: Union[Dict, FrozenDict],
         is_main_process: bool = True,
         push_to_hub: bool = False,
         **kwargs,
@@ -502,8 +343,6 @@ class MLXModelMixin(PushToHubMixin):
         Arguments:
             save_directory (`str` or `os.PathLike`):
                 Directory to save a model and its configuration file to. Will be created if it doesn't exist.
-            params (`Union[Dict, FrozenDict]`):
-                A `PyTree` of model parameters.
             is_main_process (`bool`, *optional*, defaults to `True`):
                 Whether the process calling this is the main process or not. Useful during distributed training and you
                 need to call this function on all processes. In this case, set `is_main_process=True` only on the main
@@ -542,7 +381,7 @@ class MLXModelMixin(PushToHubMixin):
 
         # save model
         output_model_file = os.path.join(save_directory, MLX_WEIGHTS_NAME)
-        mx.save_safetensors(output_model_file)
+        self.save_weights(output_model_file)
         
         logger.info(f"Model weights saved in {output_model_file}")
 

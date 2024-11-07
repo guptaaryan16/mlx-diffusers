@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.nn as nn
 
-from ...configuration_utils import ConfigMixin, mlx_register_to_config
+from ...configuration_utils import ConfigMixin
 from ...utils import BaseOutput
 from ..embeddings_mlx import MLXTimestepEmbedding, MLXTimesteps
 from ..modeling_mlx_utils import MLXModelMixin
@@ -45,7 +45,6 @@ class MLXUNet2DConditionOutput(BaseOutput):
     sample: mx.array
 
 
-@mlx_register_to_config
 class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
     r"""
     MLX implementation of conditional 2D UNet model that takes a noisy sample, conditional state, and a timestep and returns a sample

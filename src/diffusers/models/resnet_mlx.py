@@ -14,6 +14,7 @@
 import mlx.core as mx
 import mlx.nn as nn
 
+from typing import Optional
 
 # Taken from https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/unet.py
 def upsample_nearest(x, scale: int = 2):
@@ -27,16 +28,19 @@ class MLXUpsample2D(nn.Module):
     def __init__(
         self,
         out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1
     ):
         self.conv = nn.Conv2d(
-            self.out_channels,
-            kernel_size=3,
-            strides=1,
-            padding=1,
+            out_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding
         )
 
     def __call__(self, hidden_states):
-        batch, height, width, channels = hidden_states.shape
         hidden_states = upsample_nearest(hidden_states, 2)
         hidden_states = self.conv(hidden_states)
         return hidden_states
@@ -46,13 +50,16 @@ class MLXDownsample2D(nn.Module):
     def __init__(
         self,
         out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 2,
+        padding: int = 1 
     ):
         self.conv = nn.Conv2d(
-            self.out_channels,
-            self.out_channels,
-            kernel_size=3,
-            strides=2,
-            padding=1,
+            out_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
         )
 
     def __call__(self, hidden_states):
@@ -68,61 +75,64 @@ class MLXResnetBlock2D(nn.Module):
         self,
         in_channels: int,
         out_channels: Optional[int] = None,
-        groups: int = 32,
         temb_channels: Optional[int] = None,
+        groups: int = 32,
     ):
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.groups = groups
         self.temb_channels = temb_channels
-
         out_channels = (
-            self.in_channels if self.out_channels is None else self.out_channels
+            in_channels if out_channels is None else out_channels
         )
 
         self.norm1 = nn.GroupNorm(
-            num_groups=self.groups, dims=self.in_channels, pytorch_compatible=True
+            num_groups=groups, dims=in_channels, pytorch_compatible=True
         )
         self.conv1 = nn.Conv2d(
             in_channels,
             out_channels,
             kernel_size=3,
-            strides=1,
+            stride=1,
             padding=1
         )
 
-        if self.temb_channels is not None:
+        if temb_channels is not None:
             self.time_emb_proj = nn.Linear(temb_channels, out_channels)
 
         self.norm2 = nn.GroupNorm(
-            num_groups=self.groups, dims=self.in_channels, pytorch_compatible=True
+            num_groups=groups, dims=out_channels, pytorch_compatible=True
         )
 
         self.conv2 = nn.Conv2d(
             out_channels,
             out_channels,
             kernel_size=3,
-            strides=1,
+            stride=1,
             padding=1,
         )
+        self.conv_shortcut = None
         if in_channels != out_channels:
-            self.conv_shortcut = nn.Linear(self.in_channels, self.out_channels)
+            self.conv_shortcut = nn.Linear(in_channels, out_channels)
 
-    def __call__(self, hidden_states, temb):
+    def __call__(self, hidden_states, temb=None):
+        temb = hidden_states if temb is None else temb
+        
+        if self.temb_channels is not None:
+            temb = self.time_emb_proj(nn.silu(temb))
+        
         residual = hidden_states
+
         hidden_states = self.norm1(hidden_states)
+   
         hidden_states = nn.silu(hidden_states)
         hidden_states = self.conv1(hidden_states)
-
-        temb = self.time_emb_proj(nn.silu(temb))
-        temb = mx.expand_dims(mx.expand_dims(temb, 1), 1)
-        hidden_states = hidden_states + temb
+        
+        if self.temb_channels is not None:
+            hidden_states = hidden_states + temb[:, None, None, :]
 
         hidden_states = self.norm2(hidden_states)
         hidden_states = nn.silu(hidden_states)
         hidden_states = self.conv2(hidden_states)
 
         if self.conv_shortcut is not None:
-            residual = self.conv_shortcut(residual)
+            hidden_states = hidden_states + self.conv_shortcut(residual)
 
-        return hidden_states + residual
+        return hidden_states

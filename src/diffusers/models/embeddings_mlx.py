@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Used implementation from
 
 import math
 import mlx.core as mx
@@ -66,17 +65,14 @@ class MLXTimestepEmbedding(nn.Module):
     Args:
         time_embed_dim (`int`, *optional*, defaults to `32`):
                 Time step embedding dimension
-        dtype (:obj:`mx.Dtype`, *optional*, defaults to mx.float32):
-                Parameters `dtype`
     """
 
     def __init__(
-        self,  
+        self, 
+        in_channels: int,
         time_embed_dim: int = 32,
-        dtype: mx.Dtype = mx.float32
     ):
         self.time_embed_dim = time_embed_dim
-        self.dtype = dtype
 
         self.linear_1 = nn.Linear(in_channels, time_embed_dim)
         self.linear_2 = nn.Linear(time_embed_dim, time_embed_dim)
@@ -104,7 +100,7 @@ class MLXTimesteps(nn.Module):
         freq_shift: float = 1
     ):
         self.dim = dim
-        self.flip_sin_to_cos = self.flip_sin_to_cos
+        self.flip_sin_to_cos = flip_sin_to_cos
         self.freq_shift = freq_shift
 
     def __call__(self, timesteps):

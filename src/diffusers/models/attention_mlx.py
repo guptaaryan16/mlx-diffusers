@@ -11,14 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.huggingface/diffusers.git
-import functools
 import math
+from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 
 ## Inspired from example here: https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/unet.py
-## I am using complete implementations as in Flax and pyTorch implementation of diffusers to make it easy tp maintain the library in future with the similar API
 
 class MLXAttention(nn.Module):
     r"""
@@ -66,10 +65,10 @@ class MLXAttention(nn.Module):
         inner_dim = self.dim_head * self.heads
         self.scale = self.dim_head**-0.5
 
-        self.to_q = Linear(query_input_dims, dims, bias=bias)
-        self.to_k = Linear(key_input_dims, dims, bias=bias)
-        self.to_v = Linear(value_input_dims, value_dims, bias=bias)
-        self.to_out_0 = Linear(value_dims, value_output_dims, bias=bias)
+        self.to_q = nn.Linear(query_input_dims, dims, bias=bias)
+        self.to_k = nn.Linear(key_input_dims, dims, bias=bias)
+        self.to_v = nn.Linear(value_input_dims, value_dims, bias=bias)
+        self.to_out_0 = nn.Linear(value_dims, value_output_dims, bias=bias)
 
     def __call__(self, hidden_states, context=None, mask=None):
         context = hidden_states if context is None else context
@@ -132,7 +131,7 @@ class MLXBasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(model_dims)
         self.ff = MLXFeedForward(model_dims, hidden_dims)
 
-    def __call__(self, residual, hidden_states=None, attn_mask=None):
+    def __call__(self, hidden_states, context=None, attn_mask=None):
         # self attention
         residual = hidden_states
         hidden_states = self.attn1(self.norm1(hidden_states), attn_mask)
@@ -191,7 +190,6 @@ class MLXTransformer2DModel(nn.Module):
     def __call__(self, hidden_states, context, attn_mask):
         # Save the input to add to the output
         residual = hidden_states
-        dtype = hidden_statesx.dtype
 
         # Perform the input norm and projection
         B, H, W, C = hidden_states.shape
