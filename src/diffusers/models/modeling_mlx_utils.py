@@ -264,13 +264,12 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                 )
         # Used https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/base.py
         # Didn't use mlx.nn.Module.load_weights method directly for enhanced debugging within the diffusers library
-        state = list(mx.load(model_file).items())
+        state = dict(mx.load(model_file).items())
         
         required_params = dict(tree_flatten(model.parameters()))
-
         unexpected_keys = (state.keys() - required_params.keys())
         missing_keys = (required_params.keys() - state.keys())
-    
+
         if missing_keys:
             logger.warning(
                 f"The checkpoint {pretrained_model_name_or_path} is missing required keys: {missing_keys}. "

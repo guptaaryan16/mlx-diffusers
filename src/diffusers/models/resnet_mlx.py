@@ -41,7 +41,7 @@ class MLXUpsample2D(nn.Module):
         )
 
     def __call__(self, hidden_states):
-        hidden_states = upsample_nearest(hidden_states, 2)
+        hidden_states = upsample_nearest(hidden_states, 1)
         hidden_states = self.conv(hidden_states)
         return hidden_states
 
@@ -106,11 +106,11 @@ class MLXResnetBlock2D(nn.Module):
             out_channels,
             kernel_size=3,
             stride=1,
-            padding=1,
+            padding=1
         )
         self.conv_shortcut = None
         if in_channels != out_channels:
-            self.conv_shortcut = nn.Linear(in_channels, out_channels)
+            self.conv_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
     def __call__(self, hidden_states, temb=None):
         temb = hidden_states if temb is None else temb

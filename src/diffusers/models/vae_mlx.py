@@ -127,7 +127,7 @@ class MLXDownEncoderBlock2D(nn.Module):
         self.resnets = resnets
 
         if self.add_downsample:
-            self.downsamplers_0 = MLXDownsample2D(out_channels)
+            self.downsamplers = MLXDownsample2D(out_channels, stride=2, padding=0)
 
     def __call__(self, hidden_states):
         
@@ -135,7 +135,7 @@ class MLXDownEncoderBlock2D(nn.Module):
             hidden_states = resnet(hidden_states)
         if self.add_downsample:
             hidden_states = mx.pad(hidden_states, [(0, 0), (0, 1), (0, 1), (0, 0)])
-            hidden_states = self.downsamplers_0(hidden_states)
+            hidden_states = self.downsamplers(hidden_states)
 
         return hidden_states
 
@@ -182,14 +182,14 @@ class MLXUpDecoderBlock2D(nn.Module):
         self.resnets = resnets
 
         if self.add_upsample:
-            self.upsamplers_0 = MLXUpsample2D(out_channels, out_channels)
+            self.upsamplers = MLXUpsample2D(out_channels)
 
     def __call__(self, hidden_states):
         for resnet in self.resnets:
             hidden_states = resnet(hidden_states)
 
         if self.add_upsample:
-            hidden_states = self.upsamplers_0(upsample_nearest(hidden_states))
+            hidden_states = self.upsamplers(upsample_nearest(hidden_states))
 
         return hidden_states
 
@@ -335,21 +335,19 @@ class MLXEncoder(nn.Module):
         )
 
     def __call__(self, sample):
-        # in
         sample = self.conv_in(sample)
-
+        
         # downsampling
         for block in self.down_blocks:
             sample = block(sample)
-
+        
         # middle
         sample = self.mid_block(sample)
-
+        
         # end
         sample = self.conv_norm_out(sample)
         sample = nn.silu(sample)
         sample = self.conv_out(sample)
-
         return sample
 
 
@@ -429,7 +427,6 @@ class MLXDecoder(nn.Module):
         )
 
     def __call__(self, sample):
-        # z to block_in
         sample = self.conv_in(sample)
 
         # middle
@@ -538,7 +535,8 @@ class MLXAutoencoderKL(MLXModelMixin, ConfigMixin):
         latent_channels: int = 4,
         norm_num_groups: int = 32,
         sample_size: int = 32,
-        scaling_factor: float = 0.18215
+        scaling_factor: float = 0.18215,
+        dtype: mx.Dtype = mx.float32
     ):
         super().__init__()
         self.latent_channels = latent_channels
@@ -619,7 +617,6 @@ class MLXAutoencoderKL(MLXModelMixin, ConfigMixin):
             hidden_states = posterior.latent_dist.sample(rng)
         else:
             hidden_states = posterior.latent_dist.mode()
-
         sample = self.decode(hidden_states, return_dict=return_dict).sample
 
         if not return_dict:
