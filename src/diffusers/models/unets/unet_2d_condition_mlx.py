@@ -23,14 +23,10 @@ from ...utils import BaseOutput
 from ..embeddings_mlx import MLXTimestepEmbedding, MLXTimesteps
 from ..modeling_mlx_utils import MLXModelMixin
 from .unet_2d_blocks_mlx import (
-    MLXCrossAttnDownBlock2D,
-    MLXCrossAttnUpBlock2D,
     MLXDownBlock2D,
-    MLXUNetMidBlock2DCrossAttn,
-    MLXUpBlock2D,
+    MLXUpBlock2D
 )
 
-# TODO: used the Flax API directly for most parts, needs good testing to ensure things are correctly implemented
 
 @dataclass
 class MLXUNet2DConditionOutput(BaseOutput):
@@ -45,7 +41,7 @@ class MLXUNet2DConditionOutput(BaseOutput):
     sample: mx.array
 
 
-class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
+class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
     r"""
     MLX implementation of conditional 2D UNet model that takes a noisy sample, conditional state, and a timestep and returns a sample
     shaped output.
@@ -96,16 +92,10 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
         in_channels: int = 4,
         out_channels: int = 4,
         down_block_types: Tuple[str, ...] = (
-            "MLXCrossAttnDownBlock2D",
-            "MLXCrossAttnDownBlock2D",
-            "MLXCrossAttnDownBlock2D",
-            "MLXDownBlock2D",
+            "DownBlock2D",
         ),
         up_block_types: Tuple[str, ...] = (
-            "MLXUpBlock2D",
-            "MLXCrossAttnUpBlock2D",
-            "MLXCrossAttnUpBlock2D",
-            "MLXCrossAttnUpBlock2D",
+            "UpBlock2D",
         ),
         mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
         only_cross_attention: Union[bool, Tuple[bool]] = False,
@@ -125,111 +115,58 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
         addition_time_embed_dim: Optional[int] = None,
         addition_embed_type_num_heads: int = 64,
         projection_class_embeddings_input_dim: Optional[int] = None,
+        dtype: mx.Dtype = mx.float32
     ):
 
-        # TODO : Work on this problem 
-        def init_weights(self, rng: mx.array):
-            # init input tensors
-            sample_shape = (1, self.in_channels, self.sample_size, self.sample_size)
-            sample = mx.zeros(sample_shape, dtype=mx.float32)
-            timesteps = mx.ones((1,), dtype=mx.int32)
-            encoder_hidden_states = mx.zeros(
-                (1, 1, self.cross_attention_dim), dtype=mx.float32
-            )
+        self.block_out_channels = block_out_channels
+        self.time_embed_dim = block_out_channels[0] * 4
 
-            params_rng, dropout_rng = mx.random.split(rng)
-            rngs = {"params": params_rng, "dropout": dropout_rng}
-
-            added_cond_kwargs = None
-            if self.addition_embed_type == "text_time":
-                # we retrieve the expected `text_embeds_dim` by first checking if the architecture is a refiner
-                # or non-refiner architecture and then by "reverse-computing" from `projection_class_embeddings_input_dim`
-                is_refiner = (
-                    5 * self.config.addition_time_embed_dim
-                    + self.config.cross_attention_dim
-                    == self.config.projection_class_embeddings_input_dim
-                )
-                num_micro_conditions = 5 if is_refiner else 6
-
-                text_embeds_dim = self.config.projection_class_embeddings_input_dim - (
-                    num_micro_conditions * self.config.addition_time_embed_dim
-                )
-
-                time_ids_channels = (
-                    self.projection_class_embeddings_input_dim - text_embeds_dim
-                )
-                time_ids_dims = time_ids_channels // self.addition_time_embed_dim
-                added_cond_kwargs = {
-                    "text_embeds": mx.zeros((1, text_embeds_dim), dtype=mx.float32),
-                    "time_ids": mx.zeros((1, time_ids_dims), dtype=mx.float32),
-                }
-            return self.init(
-                rngs, sample, timesteps, encoder_hidden_states, added_cond_kwargs
-            )["params"]
-
-        block_out_channels = self.block_out_channels
-        time_embed_dim = block_out_channels[0] * 4
-
-        if self.num_attention_heads is not None:
-            raise ValueError(
-                "At the moment it is not possible to define the number of attention heads via `num_attention_heads` because of a naming issue as described in https://github.com/huggingface/diffusers/issues/2011#issuecomment-1547958131. Passing `num_attention_heads` will only be supported in diffusers v0.19."
-            )
-
-        # If `num_attention_heads` is not defined (which is the case for most models)
-        # it will default to `attention_head_dim`. This looks weird upon first reading it and it is.
-        # The reason for this behavior is to correct for incorrectly named variables that were introduced
-        # when this library was created. The incorrect naming was only discovered much later in https://github.com/huggingface/diffusers/issues/2011#issuecomment-1547958131
-        # Changing `attention_head_dim` to `num_attention_heads` for 40,000+ configurations is too backwards breaking
-        # which is why we correct for the naming here.
-        num_attention_heads = self.num_attention_heads or self.attention_head_dim
+        num_attention_heads = num_attention_heads or attention_head_dim
 
         # input
         self.conv_in = nn.Conv2d(
             block_out_channels[0],
             block_out_channels[0],
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding=((1, 1), (1, 1)),
-            dtype=self.dtype,
+            kernel_size=3,
+            strides=1,
+            padding=1,
         )
 
         # time
         self.time_proj = MLXTimesteps(
             block_out_channels[0],
-            flip_sin_to_cos=self.flip_sin_to_cos,
-            freq_shift=self.config.freq_shift,
+            flip_sin_to_cos=flip_sin_to_cos,
+            freq_shift=config.freq_shift,
         )
-        self.time_embedding = MLXTimestepEmbedding(time_embed_dim, dtype=self.dtype)
+        self.time_embedding = MLXTimestepEmbedding(block_out_channels[0], time_embed_dim)
 
-        only_cross_attention = self.only_cross_attention
         if isinstance(only_cross_attention, bool):
-            only_cross_attention = (only_cross_attention,) * len(self.down_block_types)
+            only_cross_attention = (only_cross_attention,) * len(down_block_types)
 
         if isinstance(num_attention_heads, int):
-            num_attention_heads = (num_attention_heads,) * len(self.down_block_types)
+            num_attention_heads = (num_attention_heads,) * len(down_block_types)
 
         # transformer layers per block
-        transformer_layers_per_block = self.transformer_layers_per_block
         if isinstance(transformer_layers_per_block, int):
             transformer_layers_per_block = [transformer_layers_per_block] * len(
-                self.down_block_types
+                down_block_types
             )
 
         # addition embed types
-        if self.addition_embed_type is None:
-            self.add_embedding = None
-        elif self.addition_embed_type == "text_time":
-            if self.addition_time_embed_dim is None:
+        if addition_embed_type is None:
+            add_embedding = None
+        elif addition_embed_type == "text_time":
+            if addition_time_embed_dim is None:
                 raise ValueError(
-                    f"addition_embed_type {self.addition_embed_type} requires `addition_time_embed_dim` to not be None"
+                    f"addition_embed_type {addition_embed_type} requires `addition_time_embed_dim` to not be None"
                 )
-            self.add_time_proj = MLXTimesteps(
-                self.addition_time_embed_dim, self.flip_sin_to_cos, self.freq_shift
+            add_time_proj = MLXTimesteps(
+                addition_time_embed_dim, flip_sin_to_cos, freq_shift
             )
-            self.add_embedding = MLXTimestepEmbedding(time_embed_dim, dtype=self.dtype)
+            add_embedding = MLXTimestepEmbedding(time_embed_dim)
         else:
             raise ValueError(
-                f"addition_embed_type: {self.addition_embed_type} must be None or `text_time`."
+                f"addition_embed_type: {addition_embed_type} must be None or `text_time`."
             )
 
         # down
@@ -240,30 +177,13 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
             output_channel = block_out_channels[i]
             is_final_block = i == len(block_out_channels) - 1
 
-            if down_block_type == "CrossAttnDownBlock2D":
-                down_block = MLXCrossAttnDownBlock2D(
-                    in_channels=input_channel,
-                    out_channels=output_channel,
-                    dropout=self.dropout,
-                    num_layers=self.layers_per_block,
-                    transformer_layers_per_block=transformer_layers_per_block[i],
-                    num_attention_heads=num_attention_heads[i],
-                    add_downsample=not is_final_block,
-                    use_linear_projection=self.use_linear_projection,
-                    only_cross_attention=only_cross_attention[i],
-                    use_memory_efficient_attention=self.use_memory_efficient_attention,
-                    split_head_dim=self.split_head_dim,
-                    dtype=self.dtype,
-                )
-            else:
-                down_block = MLXDownBlock2D(
-                    in_channels=input_channel,
-                    out_channels=output_channel,
-                    dropout=self.dropout,
-                    num_layers=self.layers_per_block,
-                    add_downsample=not is_final_block,
-                    dtype=self.dtype,
-                )
+            down_block = MLXDownBlock2D(
+                in_channels=input_channel,
+                out_channels=output_channel,
+                dropout=self.dropout,
+                num_layers=self.layers_per_block,
+                add_downsample=not is_final_block,
+            )
 
             down_blocks.append(down_block)
         self.down_blocks = down_blocks
@@ -278,7 +198,6 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
                 use_linear_projection=self.use_linear_projection,
                 use_memory_efficient_attention=self.use_memory_efficient_attention,
                 split_head_dim=self.split_head_dim,
-                dtype=self.dtype,
             )
         elif self.config.mid_block_type is None:
             self.mid_block = None
@@ -303,35 +222,15 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
 
             is_final_block = i == len(block_out_channels) - 1
 
-            if up_block_type == "CrossAttnUpBlock2D":
-                up_block = MLXCrossAttnUpBlock2D(
-                    in_channels=input_channel,
-                    out_channels=output_channel,
-                    prev_output_channel=prev_output_channel,
-                    num_layers=self.layers_per_block + 1,
-                    transformer_layers_per_block=reversed_transformer_layers_per_block[
-                        i
-                    ],
-                    num_attention_heads=reversed_num_attention_heads[i],
-                    add_upsample=not is_final_block,
-                    dropout=self.dropout,
-                    use_linear_projection=self.use_linear_projection,
-                    only_cross_attention=only_cross_attention[i],
-                    use_memory_efficient_attention=self.use_memory_efficient_attention,
-                    split_head_dim=self.split_head_dim,
-                    dtype=self.dtype,
-                )
-            else:
-                up_block = MLXUpBlock2D(
-                    in_channels=input_channel,
-                    out_channels=output_channel,
-                    prev_output_channel=prev_output_channel,
-                    num_layers=self.layers_per_block + 1,
-                    add_upsample=not is_final_block,
-                    dropout=self.dropout,
-                    dtype=self.dtype,
-                )
-
+            up_block = MLXUpBlock2D(
+                in_channels=input_channel,
+                out_channels=output_channel,
+                prev_output_channel=prev_output_channel,
+                num_layers=self.layers_per_block + 1,
+                add_upsample=not is_final_block,
+                dropout=self.dropout,
+                dtype=self.dtype,
+            )
             up_blocks.append(up_block)
             prev_output_channel = output_channel
         self.up_blocks = up_blocks
@@ -339,12 +238,11 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
         # out
         self.conv_norm_out = nn.GroupNorm(num_groups=32, epsilon=1e-5)
         self.conv_out = nn.Conv2d(
-            self.out_channels,
-            self.out_channels,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding=((1, 1), (1, 1)),
-            dtype=self.dtype,
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            strides=1,
+            padding=1
         )
 
     def __call__(
@@ -352,7 +250,7 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
         sample: mx.array,
         timesteps: Union[mx.array, float, int],
         encoder_hidden_states: mx.array,
-        added_cond_kwargs: Optional[Union[Dict, FrozenDict]] = None,
+        added_cond_kwargs: Optional[Dict] = None,
         down_block_additional_residuals: Optional[Tuple[mx.array, ...]] = None,
         mid_block_additional_residual: Optional[mx.array] = None,
         return_dict: bool = True,
@@ -425,12 +323,7 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
         # 3. down
         down_block_res_samples = (sample,)
         for down_block in self.down_blocks:
-            if isinstance(down_block, FlaxCrossAttnDownBlock2D):
-                sample, res_samples = down_block(
-                    sample, t_emb, encoder_hidden_states, deterministic=not train
-                )
-            else:
-                sample, res_samples = down_block(sample, t_emb, deterministic=not train)
+            sample, res_samples = down_block(sample, t_emb)
             down_block_res_samples += res_samples
 
         if down_block_additional_residuals is not None:
@@ -447,7 +340,7 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
         # 4. mid
         if self.mid_block is not None:
             sample = self.mid_block(
-                sample, t_emb, encoder_hidden_states, deterministic=not train
+                sample, t_emb, encoder_hidden_states
             )
 
         if mid_block_additional_residual is not None:
@@ -459,21 +352,11 @@ class MLXUNet2DConditionModel(nn.Module, MLXModelMixin, ConfigMixin):
             down_block_res_samples = down_block_res_samples[
                 : -(self.layers_per_block + 1)
             ]
-            if isinstance(up_block, FlaxCrossAttnUpBlock2D):
-                sample = up_block(
-                    sample,
-                    temb=t_emb,
-                    encoder_hidden_states=encoder_hidden_states,
-                    res_hidden_states_tuple=res_samples,
-                    deterministic=not train,
-                )
-            else:
-                sample = up_block(
-                    sample,
-                    temb=t_emb,
-                    res_hidden_states_tuple=res_samples,
-                    deterministic=not train,
-                )
+            sample = up_block(
+                sample,
+                temb=t_emb,
+                res_hidden_states_tuple=res_samples
+            )
 
         # 6. post-process
         sample = self.conv_norm_out(sample)

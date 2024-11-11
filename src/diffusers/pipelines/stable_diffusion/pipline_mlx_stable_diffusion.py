@@ -20,7 +20,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel
+from transformers import CLIPImageProcessor, CLIPTokenizer, CLIPTextModel
 from ...models import MLXAutoencoderKL, MLXUNet2DConditionModel
 
 from ...schedulers import MLXEulerDiscreteScheduler, MLXDDPMScheduler
