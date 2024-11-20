@@ -66,7 +66,7 @@ class MLXAttention(nn.Module):
         self.query = nn.Linear(dims, dims)
         self.key = nn.Linear(dims, dims)
         self.value = nn.Linear(dims, dims)
-        self.proj_attn = [nn.Linear(dims, dims)]
+        self.proj_attn = nn.Linear(dims, dims)
 
     def __call__(self, x):
         B, H, W, C = x.shape
@@ -82,7 +82,7 @@ class MLXAttention(nn.Module):
         attn = mx.softmax(scores, axis=-1)
         y = (attn @ values).reshape(B, H, W, C)
 
-        y = self.proj_attn[0](y)
+        y = self.proj_attn(y)
         x = x + y
 
         return x
