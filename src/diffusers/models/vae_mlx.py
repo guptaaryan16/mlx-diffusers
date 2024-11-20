@@ -63,26 +63,26 @@ class MLXAttention(nn.Module):
         super().__init__()
 
         self.group_norm = nn.GroupNorm(norm_groups, dims, pytorch_compatible=True)
-        self.to_q = nn.Linear(dims, dims)
-        self.to_k = nn.Linear(dims, dims)
-        self.to_v = nn.Linear(dims, dims)
-        self.to_out = nn.Linear(dims, dims)
+        self.query = nn.Linear(dims, dims)
+        self.key = nn.Linear(dims, dims)
+        self.value = nn.Linear(dims, dims)
+        self.proj_attn = [nn.Linear(dims, dims)]
 
     def __call__(self, x):
         B, H, W, C = x.shape
 
         y = self.group_norm(x)
 
-        queries = self.to_q(y).reshape(B, H * W, C)
-        keys = self.to_k(y).reshape(B, H * W, C)
-        values = self.to_v(y).reshape(B, H * W, C)
+        queries = self.query(y).reshape(B, H * W, C)
+        keys = self.key(y).reshape(B, H * W, C)
+        values = self.value(y).reshape(B, H * W, C)
 
         scale = 1 / math.sqrt(queries.shape[-1])
         scores = (queries * scale) @ keys.transpose(0, 2, 1)
         attn = mx.softmax(scores, axis=-1)
         y = (attn @ values).reshape(B, H, W, C)
 
-        y = self.to_out(y)
+        y = self.proj_attn[0](y)
         x = x + y
 
         return x
@@ -127,7 +127,7 @@ class MLXDownEncoderBlock2D(nn.Module):
         self.resnets = resnets
 
         if self.add_downsample:
-            self.downsamplers = MLXDownsample2D(out_channels, stride=2, padding=0)
+            self.downsamplers = [MLXDownsample2D(out_channels, stride=2, padding=0)]
 
     def __call__(self, hidden_states):
         
@@ -135,7 +135,7 @@ class MLXDownEncoderBlock2D(nn.Module):
             hidden_states = resnet(hidden_states)
         if self.add_downsample:
             hidden_states = mx.pad(hidden_states, [(0, 0), (0, 1), (0, 1), (0, 0)])
-            hidden_states = self.downsamplers(hidden_states)
+            hidden_states = self.downsamplers[0](hidden_states)
 
         return hidden_states
 
@@ -182,14 +182,14 @@ class MLXUpDecoderBlock2D(nn.Module):
         self.resnets = resnets
 
         if self.add_upsample:
-            self.upsamplers = MLXUpsample2D(out_channels)
+            self.upsamplers = [MLXUpsample2D(out_channels)]
 
     def __call__(self, hidden_states):
         for resnet in self.resnets:
             hidden_states = resnet(hidden_states)
 
         if self.add_upsample:
-            hidden_states = self.upsamplers(upsample_nearest(hidden_states))
+            hidden_states = self.upsamplers[0](upsample_nearest(hidden_states))
 
         return hidden_states
 
@@ -570,12 +570,7 @@ class MLXAutoencoderKL(MLXModelMixin, ConfigMixin):
             kernel_size=1,
             stride=1,
         )
-
-    def init_weights(self):
-        # init input tensors
-        init_fn = nn.init.uniform()
-        self.apply(init_fn)
-
+        
     def encode(self, sample, deterministic: bool = True, return_dict: bool = True):
         sample = mx.transpose(sample, (0, 2, 3, 1))
 

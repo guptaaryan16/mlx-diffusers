@@ -206,7 +206,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
             try:
                 model_file = hf_hub_download(
                     pretrained_model_name_or_path,
-                    filename=SAFETENSORS_WEIGHTS_NAME if not from_pt else MLX_WEIGHTS_NAME,
+                    filename=SAFETENSORS_WEIGHTS_NAME if from_pt else MLX_WEIGHTS_NAME,
                     cache_dir=cache_dir,
                     force_download=force_download,
                     proxies=proxies,
@@ -267,7 +267,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
         required_params = dict(tree_flatten(model.parameters()))
         unexpected_keys = (state.keys() - required_params.keys())
         missing_keys = (required_params.keys() - state.keys())
-        
+    
         if missing_keys:
             logger.warning(
                 f"The checkpoint {pretrained_model_name_or_path} is missing required keys: {missing_keys}. "
