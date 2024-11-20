@@ -14,17 +14,19 @@
 from typing import Dict, Optional, Tuple, Union
 from dataclasses import dataclass
 
-
 import mlx.core as mx
 import mlx.nn as nn
 
-from ...configuration_utils import ConfigMixin
+from ...configuration_utils import ConfigMixin, register_to_config
 from ...utils import BaseOutput
 from ..embeddings_mlx import MLXTimestepEmbedding, MLXTimesteps
 from ..modeling_mlx_utils import MLXModelMixin
 from .unet_2d_blocks_mlx import (
+    MLXCrossAttnDownBlock2D,
+    MLXCrossAttnUpBlock2D,
     MLXDownBlock2D,
-    MLXUpBlock2D
+    MLXUNetMidBlock2DCrossAttn,
+    MLXUpBlock2D,
 )
 
 
@@ -79,73 +81,67 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
         flip_sin_to_cos (`bool`, *optional*, defaults to `True`):
             Whether to flip the sin to cos in the time embedding.
         freq_shift (`int`, *optional*, defaults to 0): The frequency shift to apply to the time embedding.
-        use_memory_efficient_attention (`bool`, *optional*, defaults to `False`):
-            Enable memory efficient attention as described [here](https://arxiv.org/abs/2112.05682).
-        split_head_dim (`bool`, *optional*, defaults to `False`):
-            Whether to split the head dimension into a new axis for the self-attention computation. In most cases,
-            enabling this flag should speed up the computation for Stable Diffusion 2.x and Stable Diffusion XL.
     """
-
+    @register_to_config
     def __init__(
         self,
-        sample_size: int = 32,
+        sample_size: Optional[int] = None,
         in_channels: int = 4,
         out_channels: int = 4,
-        down_block_types: Tuple[str, ...] = (
-            "DownBlock2D",
-        ),
-        up_block_types: Tuple[str, ...] = (
-            "UpBlock2D",
-        ),
-        mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
-        only_cross_attention: Union[bool, Tuple[bool]] = False,
-        block_out_channels: Tuple[int, ...] = (320, 640, 1280, 1280),
-        layers_per_block: int = 2,
-        attention_head_dim: Union[int, Tuple[int, ...]] = 8,
-        num_attention_heads: Optional[Union[int, Tuple[int, ...]]] = None,
-        cross_attention_dim: int = 1280,
-        dropout: float = 0.0,
-        use_linear_projection: bool = False,
         flip_sin_to_cos: bool = True,
         freq_shift: int = 0,
-        use_memory_efficient_attention: bool = False,
-        split_head_dim: bool = False,
-        transformer_layers_per_block: Union[int, Tuple[int, ...]] = 1,
+        down_block_types: Tuple[str] = (
+            "CrossAttnDownBlock2D",
+            "CrossAttnDownBlock2D",
+            "CrossAttnDownBlock2D",
+            "DownBlock2D",
+        ),
+        mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
+        up_block_types: Tuple[str] = ("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
+        block_out_channels: Tuple[int] = (320, 640, 1280, 1280),
+        layers_per_block: Union[int, Tuple[int]] = 2,
+        norm_num_groups: Optional[int] = 32,
+        norm_eps: float = 1e-5,
+        cross_attention_dim: Union[int, Tuple[int]] = 1280,
+        transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
+        reverse_transformer_layers_per_block: Optional[Tuple[Tuple[int]]] = None,
+        attention_head_dim: Union[int, Tuple[int]] = 8,
+        num_attention_heads: Optional[Union[int, Tuple[int]]] = None,
         addition_embed_type: Optional[str] = None,
         addition_time_embed_dim: Optional[int] = None,
-        addition_embed_type_num_heads: int = 64,
+        conv_in_kernel: int = 3,
+        conv_out_kernel: int = 3,
         projection_class_embeddings_input_dim: Optional[int] = None,
+        class_embeddings_concat: bool = False,
         dtype: mx.Dtype = mx.float32
     ):
+        super().__init__()
 
+        self.sample_size = sample_size
+        self.addition_embed_type = addition_embed_type
         self.block_out_channels = block_out_channels
         self.time_embed_dim = block_out_channels[0] * 4
-
+        time_embed_dim = block_out_channels[0] * 4 
         num_attention_heads = num_attention_heads or attention_head_dim
-
+        
         # input
+        conv_in_padding = (conv_in_kernel - 1) // 2
         self.conv_in = nn.Conv2d(
+            in_channels,
             block_out_channels[0],
-            block_out_channels[0],
-            kernel_size=3,
-            strides=1,
-            padding=1,
+            kernel_size=conv_in_kernel,
+            padding=conv_in_padding
         )
 
         # time
         self.time_proj = MLXTimesteps(
             block_out_channels[0],
             flip_sin_to_cos=flip_sin_to_cos,
-            freq_shift=config.freq_shift,
+            freq_shift=freq_shift,
         )
-        self.time_embedding = MLXTimestepEmbedding(block_out_channels[0], time_embed_dim)
-
-        if isinstance(only_cross_attention, bool):
-            only_cross_attention = (only_cross_attention,) * len(down_block_types)
-
-        if isinstance(num_attention_heads, int):
-            num_attention_heads = (num_attention_heads,) * len(down_block_types)
-
+        timestep_input_dim = block_out_channels[0]
+        self.time_embedding = MLXTimestepEmbedding(timestep_input_dim, time_embed_dim)
+        
         # transformer layers per block
         if isinstance(transformer_layers_per_block, int):
             transformer_layers_per_block = [transformer_layers_per_block] * len(
@@ -154,95 +150,158 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
 
         # addition embed types
         if addition_embed_type is None:
-            add_embedding = None
+            self.add_embedding = None
         elif addition_embed_type == "text_time":
             if addition_time_embed_dim is None:
                 raise ValueError(
                     f"addition_embed_type {addition_embed_type} requires `addition_time_embed_dim` to not be None"
                 )
-            add_time_proj = MLXTimesteps(
+            self.add_time_proj = MLXTimesteps(
                 addition_time_embed_dim, flip_sin_to_cos, freq_shift
             )
-            add_embedding = MLXTimestepEmbedding(time_embed_dim)
+            self.add_embedding = MLXTimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
         else:
             raise ValueError(
                 f"addition_embed_type: {addition_embed_type} must be None or `text_time`."
             )
 
+        if isinstance(num_attention_heads, int):
+            num_attention_heads = (num_attention_heads,) * len(down_block_types)
+
+        if isinstance(cross_attention_dim, int):
+            cross_attention_dim = (cross_attention_dim,) * len(down_block_types)
+
+        if isinstance(layers_per_block, int):
+            layers_per_block = [layers_per_block] * len(down_block_types)
+
+        if isinstance(transformer_layers_per_block, int):
+            transformer_layers_per_block = [transformer_layers_per_block] * len(down_block_types)
+        
+        if class_embeddings_concat:
+            # The time embeddings are concatenated with the class embeddings. The dimension of the
+            # time embeddings passed to the down, middle, and up blocks is twice the dimension of the
+            # regular time embeddings
+            blocks_time_embed_dim = time_embed_dim * 2
+        else:
+            blocks_time_embed_dim = time_embed_dim
+
         # down
         down_blocks = []
         output_channel = block_out_channels[0]
-        for i, down_block_type in enumerate(self.down_block_types):
+        for i, down_block_type in enumerate(down_block_types):
             input_channel = output_channel
             output_channel = block_out_channels[i]
             is_final_block = i == len(block_out_channels) - 1
 
-            down_block = MLXDownBlock2D(
-                in_channels=input_channel,
-                out_channels=output_channel,
-                dropout=self.dropout,
-                num_layers=self.layers_per_block,
-                add_downsample=not is_final_block,
-            )
-
+            if down_block_type == "CrossAttnDownBlock2D":
+                down_block = MLXCrossAttnDownBlock2D(
+                    in_channels=input_channel,
+                    out_channels=output_channel,
+                    num_layers=layers_per_block[i],
+                    transformer_layers_per_block=transformer_layers_per_block[i],
+                    num_attention_heads=num_attention_heads[i],
+                    add_downsample=not is_final_block,
+                    cross_attention_dim=cross_attention_dim[i],
+                    resnet_groups=norm_num_groups,
+                    temb_channels=blocks_time_embed_dim,
+                )
+            else:
+                down_block = MLXDownBlock2D(
+                    in_channels=input_channel,
+                    out_channels=output_channel,
+                    num_layers=layers_per_block[i],
+                    add_downsample=not is_final_block,
+                    resnet_groups=norm_num_groups,
+                    temb_channels=blocks_time_embed_dim,
+                )
             down_blocks.append(down_block)
         self.down_blocks = down_blocks
 
         # mid
-        if self.config.mid_block_type == "UNetMidBlock2DCrossAttn":
+        if mid_block_type == "UNetMidBlock2DCrossAttn":
             self.mid_block = MLXUNetMidBlock2DCrossAttn(
                 in_channels=block_out_channels[-1],
-                dropout=self.dropout,
-                num_attention_heads=num_attention_heads[-1],
+                resnet_groups=norm_num_groups,
+                temb_channels=blocks_time_embed_dim,
                 transformer_layers_per_block=transformer_layers_per_block[-1],
-                use_linear_projection=self.use_linear_projection,
-                use_memory_efficient_attention=self.use_memory_efficient_attention,
-                split_head_dim=self.split_head_dim,
+                num_attention_heads=num_attention_heads[-1],
+                cross_attention_dim=cross_attention_dim[-1],
             )
-        elif self.config.mid_block_type is None:
+        elif mid_block_type is None:
             self.mid_block = None
         else:
             raise ValueError(f"Unexpected mid_block_type {self.config.mid_block_type}")
+        
+        self.num_upsamplers = 0
 
         # up
         up_blocks = []
         reversed_block_out_channels = list(reversed(block_out_channels))
         reversed_num_attention_heads = list(reversed(num_attention_heads))
-        only_cross_attention = list(reversed(only_cross_attention))
-        output_channel = reversed_block_out_channels[0]
-        reversed_transformer_layers_per_block = list(
-            reversed(transformer_layers_per_block)
+        reversed_layers_per_block = list(reversed(layers_per_block))
+        reversed_cross_attention_dim = list(reversed(cross_attention_dim))
+        reversed_transformer_layers_per_block = (
+            list(reversed(transformer_layers_per_block))
+            if reverse_transformer_layers_per_block is None
+            else reverse_transformer_layers_per_block
         )
-        for i, up_block_type in enumerate(self.up_block_types):
+        output_channel = reversed_block_out_channels[0]
+    
+        for i, up_block_type in enumerate(up_block_types):
             prev_output_channel = output_channel
             output_channel = reversed_block_out_channels[i]
             input_channel = reversed_block_out_channels[
                 min(i + 1, len(block_out_channels) - 1)
             ]
 
-            is_final_block = i == len(block_out_channels) - 1
+            is_final_block = i == len(block_out_channels) - 1# add upsample block for all BUT final layer
+            if not is_final_block:
+                add_upsample = True
+                self.num_upsamplers += 1
+            else:
+                add_upsample = False
 
-            up_block = MLXUpBlock2D(
-                in_channels=input_channel,
-                out_channels=output_channel,
-                prev_output_channel=prev_output_channel,
-                num_layers=self.layers_per_block + 1,
-                add_upsample=not is_final_block,
-                dropout=self.dropout,
-                dtype=self.dtype,
-            )
+            if up_block_type == "CrossAttnUpBlock2D":
+                up_block = MLXCrossAttnUpBlock2D(
+                    in_channels=input_channel,
+                    out_channels=output_channel,
+                    prev_output_channel=prev_output_channel,
+                    num_layers=reversed_layers_per_block[i] + 1,
+                    transformer_layers_per_block=reversed_transformer_layers_per_block[i],
+                    num_attention_heads=reversed_num_attention_heads[i],
+                    add_upsample=add_upsample,
+                    temb_channels=blocks_time_embed_dim,
+                    resnet_groups=norm_num_groups,
+                    cross_attention_dim=reversed_cross_attention_dim[i]
+                )
+            else:
+                up_block = MLXUpBlock2D(
+                    in_channels=input_channel,
+                    out_channels=output_channel,
+                    prev_output_channel=prev_output_channel,
+                    num_layers=reversed_layers_per_block[i] + 1,
+                    add_upsample=add_upsample,
+                    temb_channels=blocks_time_embed_dim,
+                    resnet_groups=norm_num_groups,
+                )
+
             up_blocks.append(up_block)
             prev_output_channel = output_channel
         self.up_blocks = up_blocks
 
         # out
-        self.conv_norm_out = nn.GroupNorm(num_groups=32, epsilon=1e-5)
+        if norm_num_groups is not None:
+            self.conv_norm_out = nn.GroupNorm(
+                dims=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps
+            )
+
+        else:
+            self.conv_norm_out = None
+            self.conv_act = None
+
+        conv_out_padding = (conv_out_kernel - 1) // 2
         self.conv_out = nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=3,
-            strides=1,
-            padding=1
+            block_out_channels[0], out_channels, kernel_size=conv_out_kernel, padding=conv_out_padding
         )
 
     def __call__(

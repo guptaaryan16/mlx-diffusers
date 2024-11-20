@@ -20,29 +20,7 @@ import mlx.nn as nn
 ## Inspired from example here: https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/unet.py
 
 class MLXAttention(nn.Module):
-    r"""
-    A MLX multi-head attention module as described in: https://arxiv.org/abs/1706.03762
-    Used the mlx base MultiHeadAttention implementation with some changes.
-
-    Parameters:
-        dims (int): The model dimensions. This is also the default
-            value for the queries, keys, values, and the output.
-        num_heads (int): The number of attention heads to use.
-        query_input_dims (int, optional): The input dimensions of the queries.
-            Default: ``dims``.
-        key_input_dims (int, optional): The input dimensions of the keys.
-            Default: ``dims``.
-        value_input_dims (int, optional): The input dimensions of the values.
-            Default: ``key_input_dims``.
-        value_dims (int, optional): The dimensions of the values after the
-            projection. Default: ``dims``.
-        value_output_dims (int, optional): The dimensions the new values will
-            be projected to. Default: ``dims``.
-        dropout (`float`, *optional*, defaults to 0.0):
-            The dropout probability to use.
-        bias (bool, optional): Whether or not to use a bias in the projections.
-            Default: ``False``.
-    """
+    """MultiHead Attention implemented for MLX. Taken from the mlx python API for changes future changes with respect to the API"""
     def __init__(
         self,
         dims: int,
@@ -54,6 +32,14 @@ class MLXAttention(nn.Module):
         value_output_dims: Optional[int] = None,
         bias: bool = False,
     ):
+        super().__init__()
+
+        if (dims % num_heads) != 0:
+            raise ValueError(
+                "The input feature dimensions should be divisible by the "
+                f"number of heads ({dims} % {num_heads}) != 0"
+            )
+        
         query_input_dims = query_input_dims or dims
         key_input_dims = key_input_dims or dims
         value_input_dims = value_input_dims or key_input_dims
@@ -61,21 +47,17 @@ class MLXAttention(nn.Module):
         value_output_dims = value_output_dims or dims
 
         self.num_heads = num_heads
-
-        inner_dim = self.dim_head * self.heads
-        self.scale = self.dim_head**-0.5
-
         self.to_q = nn.Linear(query_input_dims, dims, bias=bias)
         self.to_k = nn.Linear(key_input_dims, dims, bias=bias)
         self.to_v = nn.Linear(value_input_dims, value_dims, bias=bias)
-        self.to_out_0 = nn.Linear(value_dims, value_output_dims, bias=bias)
+        self.to_out = [
+            nn.Linear(value_dims, value_output_dims, bias=bias)
+        ] 
 
-    def __call__(self, hidden_states, context=None, mask=None):
-        context = hidden_states if context is None else context
-
-        queries = self.to_q(hidden_states)
-        keys = self.to_k(context)
-        values = self.to_v(context)
+    def __call__(self, queries, keys, values, mask=None):
+        queries = self.to_q(queries)
+        keys = self.to_k(keys)
+        values = self.to_v(values)
 
         num_heads = self.num_heads
         B, L, D = queries.shape
@@ -92,8 +74,7 @@ class MLXAttention(nn.Module):
         scores = mx.softmax(scores, axis=-1)
         values_hat = (scores @ values).transpose(0, 2, 1, 3).reshape(B, L, -1)
 
-        return self.to_out_0(values_hat)
-
+        return self.to_out[0](values_hat)
 
 class MLXBasicTransformerBlock(nn.Module):
     r"""
@@ -110,22 +91,22 @@ class MLXBasicTransformerBlock(nn.Module):
     def __init__(
         self,
         model_dims: int,
-        n_heads: int,
+        num_heads: int,
         hidden_dims: Optional[int] = None,
         memory_dims: Optional[int] = None,
     ):
         super().__init__()
 
         self.norm1 = nn.LayerNorm(model_dims)
-        self.attn1 = MLXAttention(model_dims, n_heads)
-        self.attn1.to_out_0.bias = mx.zeros(model_dims)
+        self.attn1 = MLXAttention(model_dims, num_heads)
+        self.attn1.to_out[0].bias = mx.zeros(model_dims)
 
         memory_dims = memory_dims or model_dims
         self.norm2 = nn.LayerNorm(model_dims)
         self.attn2 = MLXAttention(
-            model_dims, n_heads, key_input_dims=memory_dims
+            model_dims, num_heads, key_input_dims=memory_dims
         )
-        self.attn2.to_out_0.bias = mx.zeros(model_dims)
+        self.attn2.to_out[0].bias = mx.zeros(model_dims)
 
         hidden_dims = hidden_dims or 4 * model_dims
         self.norm3 = nn.LayerNorm(model_dims)
@@ -134,13 +115,13 @@ class MLXBasicTransformerBlock(nn.Module):
     def __call__(self, hidden_states, context=None, attn_mask=None):
         # self attention
         residual = hidden_states
-        hidden_states = self.attn1(self.norm1(hidden_states), attn_mask)
+        hidden_states = self.attn1(self.norm1(hidden_states), mask=attn_mask)
         hidden_states = hidden_states + residual
 
         # cross attention
         residual = hidden_states
         hidden_states = self.attn2(
-            self.norm2(hidden_states), context, attn_mask
+            self.norm2(hidden_states), context, mask=attn_mask
         )
         hidden_states = hidden_states + residual
 
@@ -159,33 +140,41 @@ class MLXTransformer2DModel(nn.Module):
     Parameters:
         in_channels (:obj:`int`):
             Input number of channels
-        n_heads (:obj:`int`):
+        num_heads (:obj:`int`):
             Number of heads
         d_head (:obj:`int`):
             Hidden states dimension inside each head
         depth (:obj:`int`, *optional*, defaults to 1):
             Number of transformers block
-        dropout (:obj:`float`, *optional*, defaults to 0.0):
-            Dropout rate
     """
     def __init__(
         self,
         in_channels: int,
         model_dims: int,
-        encoder_dims: int,
         num_heads: int,
+        encoder_dims: int=None,
         num_layers: int = 1,
         norm_num_groups: int = 32,
+        use_linear_projection: bool = False
     ):
         super().__init__()
 
         self.norm = nn.GroupNorm(norm_num_groups, in_channels, pytorch_compatible=True)
-        self.proj_in = nn.Linear(in_channels, model_dims)
+        
+        if use_linear_projection:
+            self.proj_in = nn.Linear(in_channels, model_dims)
+        else:
+            self.proj_in = nn.Conv2d(in_channels, model_dims, kernel_size=1, stride=1, padding=0)
+        
         self.transformer_blocks = [
             MLXBasicTransformerBlock(model_dims, num_heads, memory_dims=encoder_dims)
-            for i in range(num_layers)
+            for _ in range(num_layers)
         ]
-        self.proj_out = nn.Linear(model_dims, in_channels)
+        
+        if use_linear_projection:
+            self.proj_out = nn.Linear(model_dims, in_channels)
+        else:
+            self.proj_out = nn.Conv2d(model_dims, in_channels, kernel_size=1, stride=1, padding=0)
 
     def __call__(self, hidden_states, context, attn_mask):
         # Save the input to add to the output
@@ -230,15 +219,19 @@ class MLXFeedForward(nn.Module):
         hidden_dims: int = None,
         dropout: float = 0.0,
     ):
+        super().__init__()
         # The second linear layer needs to be called
         # net_2 for now to match the index of the Sequential layer
         hidden_dims = hidden_dims or 4 * model_dims
-        self.net_0 = MLXGEGLU(model_dims, hidden_dims, dropout)
-        self.net_2 = nn.Linear(hidden_dims, model_dims)
+        self.net = [
+            MLXGEGLU(model_dims, hidden_dims, dropout),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dims, model_dims)
+        ]
 
     def __call__(self, hidden_states):
-        hidden_states = self.net_0(hidden_states)
-        hidden_states = self.net_2(hidden_states)
+        for net in self.net:
+            hidden_states = net(hidden_states)
         return hidden_states
 
 
@@ -258,8 +251,9 @@ class MLXGEGLU(nn.Module):
     def __init__(
         self, model_dims: int, hidden_dims: int=None, dropout: float = 0.0
     ):
+        super().__init__()
         self.proj = nn.Linear(model_dims, hidden_dims*2)
-        self.dropout_layer = nn.Dropout(rate=self.dropout)
+        self.dropout_layer = nn.Dropout(dropout)
 
     def __call__(self, hidden_states):
         hidden_states = self.proj(hidden_states)

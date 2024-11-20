@@ -13,13 +13,11 @@
 # limitations under the License.
 
 import warnings 
-from functools import partial
 from typing import Dict, List, Optional, Union
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
-
+from packaging import version
 from transformers import CLIPImageProcessor, CLIPTokenizer, CLIPTextModel
 from ...models import MLXAutoencoderKL, MLXUNet2DConditionModel
 
@@ -31,6 +29,38 @@ from .safety_checker_mlx import MLXStableDiffusionSafetyChecker
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+EXAMPLE_DOC_STRING = """
+    Examples:
+        ```py
+        >>> import 
+        >>> import numpy as np
+        >>> from flax.jax_utils import replicate
+        >>> from flax.training.common_utils import shard
+
+        >>> from diffusers import MLXStableDiffusionPipeline
+
+        >>> pipeline, params = MLXStableDiffusionPipeline.from_pretrained(
+        ...     "runwayml/stable-diffusion-v1-5", variant="bf16", dtype=jax.numpy.bfloat16
+        ... )
+
+        >>> prompt = "a photo of an astronaut riding a horse on mars"
+
+        >>> prng_seed = jax.random.PRNGKey(0)
+        >>> num_inference_steps = 50
+
+        >>> num_samples = jax.device_count()
+        >>> prompt = num_samples * [prompt]
+        >>> prompt_ids = pipeline.prepare_inputs(prompt)
+        # shard inputs and rng
+
+        >>> params = replicate(params)
+        >>> prng_seed = jax.random.split(prng_seed, jax.device_count())
+        >>> prompt_ids = shard(prompt_ids)
+
+        >>> images = pipeline(prompt_ids, params, prng_seed, num_inference_steps, jit=True).images
+        >>> images = pipeline.numpy_to_pil(np.asarray(images.reshape((num_samples,) + images.shape[-3:])))
+        ```
+"""
 
 class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
     r"""
@@ -63,10 +93,10 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
     def __init__(
         self,
         vae: MLXAutoencoderKL,
-        text_encoder: MLXCLIPTextModel,
+        text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: MLXUNet2DConditionModel,
-        scheduler: Union[MLXEulerDiscreteScheduler],
+        scheduler: Union[MLXEulerDiscreteScheduler, MLXDDPMScheduler],
         safety_checker: MLXStableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
         dtype: mx.Dtype = mx.float32,
@@ -111,7 +141,7 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
             )
             new_config = dict(unet.config)
             new_config["sample_size"] = 64
-            unet._internal_dict = FrozenDict(new_config)
+            unet._internal_dict = new_config
 
         self.register_modules(
             vae=vae,
@@ -172,7 +202,7 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
     def _generate(
         self,
         prompt_ids: mx.array,
-        params: Union[Dict, FrozenDict],
+        params: Dict,
         prng_seed: mx.array,
         num_inference_steps: int,
         height: int,
@@ -286,7 +316,7 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
     def __call__(
         self,
         prompt_ids: mx.array,
-        params: Union[Dict, FrozenDict],
+        params: Dict,
         prng_seed: mx.array,
         num_inference_steps: int = 50,
         height: Optional[int] = None,

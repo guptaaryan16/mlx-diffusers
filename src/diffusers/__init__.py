@@ -539,6 +539,8 @@ else:
             "MLXEulerDiscreteScheduler",
         ]
     )
+    _import_structure["models.modeling_mlx_utils"] = ["MLXModelMixin"]
+    _import_structure["models.unets.unet_2d_condition_mlx"] = ["MLXUNet2DConditionModel"]
     _import_structure["models.vae_mlx"] = ["MLXAutoencoderKL"]
 
 

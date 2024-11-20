@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import os
-from typing import Any, Dict, Union
+from typing import Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -33,11 +33,12 @@ from .. import __version__
 from ..utils import (
     CONFIG_NAME,
     MLX_WEIGHTS_NAME,
+    SAFETENSORS_WEIGHTS_NAME,
     HUGGINGFACE_CO_RESOLVE_ENDPOINT,
-    WEIGHTS_NAME,
     PushToHubMixin,
     logging,
 )
+from .modeling_mlx_pytorch_utils import convert_pytorch_state_dict_to_mlx
 
 
 logger = logging.get_logger(__name__)
@@ -149,7 +150,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
         token = kwargs.pop("token", None)
         revision = kwargs.pop("revision", None)
         subfolder = kwargs.pop("subfolder", None)
-
+        
         user_agent = {
             "diffusers": __version__,
             "file_type": "model",
@@ -174,7 +175,6 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
         model, model_kwargs = cls.from_config(
             config, dtype=dtype, return_unused_kwargs=True, **unused_kwargs
         )
-
         # Load model
         pretrained_path_with_subfolder = (
             pretrained_model_name_or_path
@@ -184,37 +184,29 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
         if os.path.isdir(pretrained_path_with_subfolder):
             if from_pt:
                 if not os.path.isfile(
-                    os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)
+                    os.path.join(pretrained_path_with_subfolder, SAFETENSORS_WEIGHTS_NAME)
                 ):
                     raise EnvironmentError(
-                        f"Error no file named {WEIGHTS_NAME} found in directory {pretrained_path_with_subfolder} "
+                        f"Error no file named {SAFETENSORS_WEIGHTS_NAME} found in directory {pretrained_path_with_subfolder} "
                     )
-                model_file = os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)
+                model_file = os.path.join(pretrained_path_with_subfolder, SAFETENSORS_WEIGHTS_NAME)
             elif os.path.isfile(
                 os.path.join(pretrained_path_with_subfolder, MLX_WEIGHTS_NAME)
             ):
-                # Load from a MLX checkpoint
+                # Load from a SAFETENSORS checkpoint
                 model_file = os.path.join(
                     pretrained_path_with_subfolder, MLX_WEIGHTS_NAME
                 )
-            # Check if pytorch weights exist instead
-            elif os.path.isfile(
-                os.path.join(pretrained_path_with_subfolder, WEIGHTS_NAME)
-            ):
-                raise EnvironmentError(
-                    f"{WEIGHTS_NAME} file found in directory {pretrained_path_with_subfolder}. Please load the model"
-                    " using `from_pt=True`."
-                )
             else:
                 raise EnvironmentError(
-                    f"Error no file named {MLX_WEIGHTS_NAME} or {WEIGHTS_NAME} found in directory "
+                    f"Error no file named {MLX_WEIGHTS_NAME} or {SAFETENSORS_WEIGHTS_NAME} found in directory "
                     f"{pretrained_path_with_subfolder}."
                 )
         else:
             try:
                 model_file = hf_hub_download(
                     pretrained_model_name_or_path,
-                    filename=MLX_WEIGHTS_NAME if not from_pt else WEIGHTS_NAME,
+                    filename=SAFETENSORS_WEIGHTS_NAME if not from_pt else MLX_WEIGHTS_NAME,
                     cache_dir=cache_dir,
                     force_download=force_download,
                     proxies=proxies,
@@ -240,7 +232,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                 )
             except EntryNotFoundError:
                 raise EnvironmentError(
-                    f"{pretrained_model_name_or_path} does not appear to have a file named {MLX_WEIGHTS_NAME}."
+                    f"{pretrained_model_name_or_path} does not appear to have a file named {SAFETENSORS_WEIGHTS_NAME}."
                 )
             except HTTPError as err:
                 raise EnvironmentError(
@@ -251,7 +243,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                 raise EnvironmentError(
                     f"We couldn't connect to '{HUGGINGFACE_CO_RESOLVE_ENDPOINT}' to load this model, couldn't find it"
                     f" in the cached files and it looks like {pretrained_model_name_or_path} is not the path to a"
-                    f" directory containing a file named {MLX_WEIGHTS_NAME} or {WEIGHTS_NAME}.\nCheckout your"
+                    f" directory containing a file named {SAFETENSORS_WEIGHTS_NAME} or {MLX_WEIGHTS_NAME}.\nCheckout your"
                     " internet connection or see how to run the library in offline mode at"
                     " 'https://huggingface.co/docs/transformers/installation#offline-mode'."
                 )
@@ -260,16 +252,22 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                     f"Can't load the model for '{pretrained_model_name_or_path}'. If you were trying to load it from "
                     "'https://huggingface.co/models', make sure you don't have a local directory with the same name. "
                     f"Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a directory "
-                    f"containing a file named {MLX_WEIGHTS_NAME} or {WEIGHTS_NAME}."
+                    f"containing a file named {SAFETENSORS_WEIGHTS_NAME} or {MLX_WEIGHTS_NAME}."
                 )
+       
         # Used https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/base.py
         # Didn't use mlx.nn.Module.load_weights method directly for enhanced debugging within the diffusers library
-        state = dict(mx.load(model_file).items())
+        if from_pt:
+            # Step 1: Get the pytorch file
+            state = dict(mx.load(model_file))
+            state = convert_pytorch_state_dict_to_mlx(state, model)
+        else:
+            state = dict(mx.load(model_file))
         
         required_params = dict(tree_flatten(model.parameters()))
         unexpected_keys = (state.keys() - required_params.keys())
         missing_keys = (required_params.keys() - state.keys())
-
+        
         if missing_keys:
             logger.warning(
                 f"The checkpoint {pretrained_model_name_or_path} is missing required keys: {missing_keys}. "
@@ -319,10 +317,10 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                 f" was trained on, you can already use {model.__class__.__name__} for predictions without further"
                 " training."
             )
+        mlx_weights = [(k, v.astype(dtype)) for k,v in state.items()] 
+        model.update(tree_unflatten(mlx_weights))
         
-        model.update(tree_unflatten(state))
-        
-        # Eval the weights due to lazy loading in MLX
+        # Eval the weights due to lazy loading in SAFETENSORS
         mx.eval(model.parameters())
         model.eval()
 
@@ -337,7 +335,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
     ):
         """
         Save a model and its configuration file to a directory so that it can be reloaded using the
-        [`~MLXModelMixin.from_pretrained`] class method.
+        [`~SAFETENSORSModelMixin.from_pretrained`] class method.
 
         Arguments:
             save_directory (`str` or `os.PathLike`):
