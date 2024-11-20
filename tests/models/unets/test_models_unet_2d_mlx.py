@@ -29,11 +29,10 @@ class MLXUNet2DConditionModelIntegrationTests(unittest.TestCase):
         return image
 
     def get_unet_model(self, fp16=False, model_id="CompVis/stable-diffusion-v1-4"):
-        dtype = mx.bfloat16 if fp16 else mx.float32
-        revision = "bf16" if fp16 else None
+        dtype = mx.float16 if fp16 else mx.float32
 
         model = MLXUNet2DConditionModel.from_pretrained(
-            model_id, subfolder="unet", dtype=dtype, revision=revision
+            model_id, subfolder="unet", dtype=dtype, from_pt=True
         )
         return model
 

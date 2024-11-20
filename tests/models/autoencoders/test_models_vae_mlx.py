@@ -37,12 +37,10 @@ class MLXAutoencoderKLTests(MLXModelTesterMixin, unittest.TestCase):
         inputs_dict = self.dummy_input
         return init_dict, inputs_dict
     
-    # TODO: Complete the model loading in mlx 
-    # def test_from_pretrained_hub(self):
-    #     model, loading_info = MLXAutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema-original", output_loading_info=True)
-    #     self.assertIsNotNone(model)
-    #     self.assertEqual(len(loading_info["missing_keys"]), 0)
+    def test_from_pretrained_hub(self):
+        model = MLXAutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema", from_pt=True)
+        self.assertIsNotNone(model)
 
-    #     image = model(**self.dummy_input)
+        image = model(**self.dummy_input)
 
-    #     assert image is not None, "Make sure output is not None"
+        assert image is not None, "Make sure output is not None"
