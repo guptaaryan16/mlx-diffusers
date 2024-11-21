@@ -41,7 +41,7 @@ class MLXUpsample2D(nn.Module):
         )
 
     def __call__(self, hidden_states):
-        hidden_states = upsample_nearest(hidden_states, 1)
+        hidden_states = upsample_nearest(hidden_states, 2)
         hidden_states = self.conv(hidden_states)
         return hidden_states
 

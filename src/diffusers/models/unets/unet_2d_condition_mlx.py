@@ -103,6 +103,7 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
         norm_num_groups: Optional[int] = 32,
         norm_eps: float = 1e-5,
         cross_attention_dim: Union[int, Tuple[int]] = 1280,
+        use_linear_projection: bool = False,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
         reverse_transformer_layers_per_block: Optional[Tuple[Tuple[int]]] = None,
         attention_head_dim: Union[int, Tuple[int]] = 8,
@@ -121,7 +122,8 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
         self.addition_embed_type = addition_embed_type
         self.block_out_channels = block_out_channels
         self.time_embed_dim = block_out_channels[0] * 4
-        time_embed_dim = block_out_channels[0] * 4 
+        self.layers_per_block = layers_per_block
+        time_embed_dim = block_out_channels[0] * 4
         num_attention_heads = num_attention_heads or attention_head_dim
         
         # input
@@ -201,6 +203,7 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
                     transformer_layers_per_block=transformer_layers_per_block[i],
                     num_attention_heads=num_attention_heads[i],
                     add_downsample=not is_final_block,
+                    use_linear_projection=use_linear_projection,
                     cross_attention_dim=cross_attention_dim[i],
                     resnet_groups=norm_num_groups,
                     temb_channels=blocks_time_embed_dim,
@@ -226,6 +229,7 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
                 transformer_layers_per_block=transformer_layers_per_block[-1],
                 num_attention_heads=num_attention_heads[-1],
                 cross_attention_dim=cross_attention_dim[-1],
+                use_linear_projection=use_linear_projection
             )
         elif mid_block_type is None:
             self.mid_block = None
@@ -270,6 +274,7 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
                     transformer_layers_per_block=reversed_transformer_layers_per_block[i],
                     num_attention_heads=reversed_num_attention_heads[i],
                     add_upsample=add_upsample,
+                    use_linear_projection=use_linear_projection,
                     temb_channels=blocks_time_embed_dim,
                     resnet_groups=norm_num_groups,
                     cross_attention_dim=reversed_cross_attention_dim[i]
@@ -382,7 +387,10 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
         # 3. down
         down_block_res_samples = (sample,)
         for down_block in self.down_blocks:
-            sample, res_samples = down_block(sample, t_emb)
+            if isinstance(down_block, MLXCrossAttnDownBlock2D):
+                sample, res_samples = down_block(sample, t_emb, encoder_hidden_states)
+            else:
+                sample, res_samples = down_block(sample, t_emb)
             down_block_res_samples += res_samples
 
         if down_block_additional_residuals is not None:
@@ -394,8 +402,8 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
                 down_block_res_sample += down_block_additional_residual
                 new_down_block_res_samples += (down_block_res_sample,)
 
-            down_block_res_samples = new_down_block_res_samples
-
+            down_block_res_samples = (new_down_block_res_samples,)
+        
         # 4. mid
         if self.mid_block is not None:
             sample = self.mid_block(
@@ -408,15 +416,17 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
         # 5. up
         for up_block in self.up_blocks:
             res_samples = down_block_res_samples[-(self.layers_per_block + 1) :]
-            down_block_res_samples = down_block_res_samples[
-                : -(self.layers_per_block + 1)
-            ]
-            sample = up_block(
-                sample,
-                temb=t_emb,
-                res_hidden_states_tuple=res_samples
-            )
-
+            down_block_res_samples = down_block_res_samples[: -(self.layers_per_block + 1)]
+            if isinstance(up_block, MLXCrossAttnUpBlock2D):
+                sample = up_block(
+                    sample,
+                    temb=t_emb,
+                    encoder_hidden_states=encoder_hidden_states,
+                    res_hidden_states_tuple=res_samples,
+                )
+            else:
+                sample = up_block(sample, temb=t_emb, res_hidden_states_tuple=res_samples)
+           
         # 6. post-process
         sample = self.conv_norm_out(sample)
         sample = nn.silu(sample)

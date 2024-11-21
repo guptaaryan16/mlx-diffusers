@@ -54,10 +54,12 @@ class MLXAttention(nn.Module):
             nn.Linear(value_dims, value_output_dims, bias=bias)
         ] 
 
-    def __call__(self, queries, keys, values, mask=None):
-        queries = self.to_q(queries)
-        keys = self.to_k(keys)
-        values = self.to_v(values)
+    def __call__(self, hidden_states, context=None, mask=None):
+        context = hidden_states if context is None else context
+
+        queries = self.to_q(hidden_states)
+        keys = self.to_k(context)
+        values = self.to_v(context)
 
         num_heads = self.num_heads
         B, L, D = queries.shape
@@ -158,10 +160,10 @@ class MLXTransformer2DModel(nn.Module):
         use_linear_projection: bool = False
     ):
         super().__init__()
-
+        self.use_linear_projection = use_linear_projection
         self.norm = nn.GroupNorm(norm_num_groups, in_channels, pytorch_compatible=True)
         
-        if use_linear_projection:
+        if self.use_linear_projection:
             self.proj_in = nn.Linear(in_channels, model_dims)
         else:
             self.proj_in = nn.Conv2d(in_channels, model_dims, kernel_size=1, stride=1, padding=0)
@@ -171,29 +173,34 @@ class MLXTransformer2DModel(nn.Module):
             for _ in range(num_layers)
         ]
         
-        if use_linear_projection:
+        if self.use_linear_projection:
             self.proj_out = nn.Linear(model_dims, in_channels)
         else:
             self.proj_out = nn.Conv2d(model_dims, in_channels, kernel_size=1, stride=1, padding=0)
 
-    def __call__(self, hidden_states, context, attn_mask):
-        # Save the input to add to the output
+    def __call__(self, hidden_states, context, attn_mask=None):
+        batch, height, width, channels = hidden_states.shape
         residual = hidden_states
+        hidden_states = self.norm(hidden_states)
+        if self.use_linear_projection:
+            hidden_states = hidden_states.reshape(batch, height * width, channels)
+            hidden_states = self.proj_in(hidden_states)
+        else:
+            hidden_states = self.proj_in(hidden_states)
+            hidden_states = hidden_states.reshape(batch, height * width, channels)
 
-        # Perform the input norm and projection
-        B, H, W, C = hidden_states.shape
-        hidden_states = self.norm(hidden_states).reshape(B, -1, C)
-        hidden_states = self.proj_in(hidden_states)
+        for transformer_block in self.transformer_blocks:
+            hidden_states = transformer_block(hidden_states, context)
 
-        # Apply the transformer
-        for block in self.transformer_blocks:
-            hidden_states = block(hidden_states, context, attn_mask)
+        if self.use_linear_projection:
+            hidden_states = self.proj_out(hidden_states)
+            hidden_states = hidden_states.reshape(batch, height, width, channels)
+        else:
+            hidden_states = hidden_states.reshape(batch, height, width, channels)
+            hidden_states = self.proj_out(hidden_states)
 
-        # Apply the output projection and reshape
-        hidden_states = self.proj_out(hidden_states)
-        hidden_states = hidden_states.reshape(B, H, W, C)
-
-        return hidden_states + residual
+        hidden_states = hidden_states + residual
+        return hidden_states
 
 
 class MLXFeedForward(nn.Module):

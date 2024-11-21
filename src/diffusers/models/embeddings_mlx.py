@@ -54,7 +54,7 @@ def get_sinusoidal_embeddings(
         signal = mx.concatenate([mx.cos(scaled_time), mx.sin(scaled_time)], axis=1)
     else:
         signal = mx.concatenate([mx.sin(scaled_time), mx.cos(scaled_time)], axis=1)
-    signal = mx.reshape(signal, [mx.shape(timesteps)[0], embedding_dim])
+    signal = mx.reshape(signal, [timesteps.shape[0], embedding_dim])
     return signal
 
 

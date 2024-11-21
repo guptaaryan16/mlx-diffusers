@@ -31,6 +31,7 @@ class MLXCrossAttnDownBlock2D(nn.Module):
         num_layers: int = 1,
         num_attention_heads: int = 1,
         add_downsample: bool = True,
+        use_linear_projection: bool = True,
         transformer_layers_per_block: int = 1,
         only_cross_attention: bool= False,
         cross_attention_dim: int=None, 
@@ -56,6 +57,7 @@ class MLXCrossAttnDownBlock2D(nn.Module):
                 in_channels=out_channels,
                 model_dims=out_channels,
                 num_heads=num_attention_heads,
+                use_linear_projection=use_linear_projection,
                 num_layers=transformer_layers_per_block,
                 encoder_dims=cross_attention_dim
             )
@@ -79,7 +81,7 @@ class MLXCrossAttnDownBlock2D(nn.Module):
 
         if self.add_downsample:
             hidden_states = self.downsamplers[0](hidden_states)
-            output_states += (hidden_states)
+            output_states += (hidden_states,)
 
         return hidden_states, output_states
 
@@ -168,6 +170,7 @@ class MLXCrossAttnUpBlock2D(nn.Module):
             num_layers: int = 1,
             num_attention_heads: int = 1,
             add_upsample: bool = True,
+            use_linear_projection:bool =False,
             transformer_layers_per_block: int = 1,
             temb_channels: int = None,
             resnet_groups: int = 32,
@@ -199,7 +202,8 @@ class MLXCrossAttnUpBlock2D(nn.Module):
                 num_heads=num_attention_heads,
                 encoder_dims=cross_attention_dim,
                 num_layers=transformer_layers_per_block,
-                norm_num_groups=resnet_groups
+                norm_num_groups=resnet_groups,
+                use_linear_projection=use_linear_projection
             )
             attentions.append(attn_block)
 
@@ -323,6 +327,7 @@ class MLXUNetMidBlock2DCrossAttn(nn.Module):
         resnet_groups: int = 32,
         temb_channels: int = None,
         cross_attention_dim: int = None,
+        use_linear_projection: bool = False
     ):
 
         # there is always at least one resnet
@@ -343,6 +348,7 @@ class MLXUNetMidBlock2DCrossAttn(nn.Module):
                 num_heads=num_attention_heads,
                 encoder_dims=cross_attention_dim,
                 num_layers=transformer_layers_per_block,
+                use_linear_projection=use_linear_projection
             )
             attentions.append(attn_block)
 
