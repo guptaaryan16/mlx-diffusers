@@ -183,18 +183,17 @@ class MLXStableDiffusionPipeline:
                     f"Unexpected latents shape, got {latents.shape}, expected {latents_shape}"
                 )
 
-        def loop_body(step, args):
-            latents, timesteps = args
+        def loop_body(step, latents):
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
-            latents_input = mx.concatenate([latents] * 2)
+            latents_input = mx.concatenate([latents]*2)
 
-            t = mx.array(timesteps, dtype=mx.int32)[step]
-            timestep = mx.broadcast_to(t, latents_input.shape[0])
+            t = mx.array(self.scheduler.timesteps, dtype=mx.int32)[step]
+            timestep = mx.broadcast_to(t, shape=[latents_input.shape[0]])
 
             latents_input = self.scheduler.scale_model_input(
-                scheduler_state, latents_input, t
+                latents_input, t
             )
 
             # predict the noise residual
@@ -203,6 +202,7 @@ class MLXStableDiffusionPipeline:
                 mx.array(timestep, dtype=mx.int32),
                 encoder_hidden_states=context,
             ).sample
+  
             # perform guidance
             noise_pred_uncond, noise_prediction_text = mx.split(noise_pred, 2, axis=0)
             noise_pred = noise_pred_uncond + guidance_scale * (
@@ -212,24 +212,24 @@ class MLXStableDiffusionPipeline:
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(
                 noise_pred, t, latents
-            ).to_tuple()
+            ).prev_sample
+
             return latents
                 
         self.scheduler.set_timesteps(
             num_inference_steps=num_inference_steps,
-            shape=latents.shape,
         )
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
 
         for i in range(num_inference_steps):
-            latents, self.scheduler.timesteps = loop_body(i, (latents, self.scheduler.timesteps))
+            latents = loop_body(i, latents)
 
         # scale and decode the image latents with vae
         latents = 1 / self.vae.config.scaling_factor * latents
-        image = self.vae(
-            latents, method=self.vae.decode
+        image = self.vae.decode(
+            latents
         ).sample
 
         image = mx.transpose(mx.clip((image / 2 + 0.5), 0, 1), (0, 2, 3, 1))
@@ -314,29 +314,29 @@ class MLXStableDiffusionPipeline:
                 neg_prompt_ids,
         )
 
-        if self.safety_checker is not None:
-            # safety_params = params["safety_checker"]
-            # images_uint8_casted = (images * 255).round().astype("uint8")
-            # num_devices, batch_size = images.shape[:2]
+        # if self.safety_checker is not None:
+        #     # safety_params = params["safety_checker"]
+        #     # images_uint8_casted = (images * 255).round().astype("uint8")
+        #     # num_devices, batch_size = images.shape[:2]
 
-            # images_uint8_casted = np.asarray(images_uint8_casted).reshape(
-            #     num_devices * batch_size, height, width, 3
-            # )
-            # images_uint8_casted, has_nsfw_concept = self._run_safety_checker(
-            #     images_uint8_casted, safety_params, jit
-            # )
-            # images = np.asarray(images).copy()
+        #     # images_uint8_casted = np.asarray(images_uint8_casted).reshape(
+        #     #     num_devices * batch_size, height, width, 3
+        #     # )
+        #     # images_uint8_casted, has_nsfw_concept = self._run_safety_checker(
+        #     #     images_uint8_casted, safety_params, jit
+        #     # )
+        #     # images = np.asarray(images).copy()
 
-            # # block images
-            # if any(has_nsfw_concept):
-            #     for i, is_nsfw in enumerate(has_nsfw_concept):
-            #         if is_nsfw:
-            #             images[i, 0] = np.asarray(images_uint8_casted[i])
+        #     # # block images
+        #     # if any(has_nsfw_concept):
+        #     #     for i, is_nsfw in enumerate(has_nsfw_concept):
+        #     #         if is_nsfw:
+        #     #             images[i, 0] = np.asarray(images_uint8_casted[i])
 
-            images = images.reshape(num_devices, batch_size, height, width, 3)
-        else:
-            images = np.asarray(images)
-            has_nsfw_concept = False
+        #     images = images.reshape(num_devices, batch_size, height, width, 3)
+        # else:
+        images = np.asarray(images)
+        has_nsfw_concept = False
 
         if not return_dict:
             return (images, has_nsfw_concept)
