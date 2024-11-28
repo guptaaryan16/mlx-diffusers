@@ -1,4 +1,4 @@
-# Copyright 2024 UC Berkeley Team and The HuggingFace Team. All rights reserved.
+# Copyright 2024 Stanford University Team and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DISCLAIMER: This file is strongly influenced by https://github.com/ermongroup/ddim
+# DISCLAIMER: This code is strongly influenced by https://github.com/pesser/pytorch_diffusion
+# and https://github.com/hojonathanho/diffusion
 
 import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
-import numpy as np
 import mlx.core as mx
+import numpy as np
 
 from ..configuration_utils import ConfigMixin, register_to_config
 from ..utils import BaseOutput
@@ -27,7 +28,8 @@ from .scheduling_utils_mlx import MLXKarrasDiffusionSchedulers, MLXSchedulerMixi
 
 
 @dataclass
-class MLXDDPMSchedulerOutput(BaseOutput):
+# Copied from diffusers.schedulers.scheduling_ddpm.DDPMSchedulerOutput with DDPM->DDIM
+class MLXDDIMSchedulerOutput(BaseOutput):
     """
     Output class for the scheduler's `step` function output.
 
@@ -43,7 +45,7 @@ class MLXDDPMSchedulerOutput(BaseOutput):
     prev_sample: mx.array
     pred_original_sample: Optional[mx.array] = None
 
-
+# Copied from diffusers.schedulers.scheduling_ddpm.betas_for_alpha_bar
 def betas_for_alpha_bar(
     num_diffusion_timesteps,
     max_beta=0.999,
@@ -104,7 +106,7 @@ def rescale_zero_terminal_snr(betas):
     # Convert betas to alphas_bar_sqrt
     alphas = 1.0 - betas
     alphas_cumprod = mx.cumprod(alphas, dim=0)
-    alphas_bar_sqrt = alphas_cumprod.sqrt()
+    alphas_bar_sqrt = mx.sqrt(alphas_cumprod)
 
     # Store old values.
     alphas_bar_sqrt_0 = alphas_bar_sqrt[0]
@@ -119,17 +121,18 @@ def rescale_zero_terminal_snr(betas):
     # Convert alphas_bar_sqrt to betas
     alphas_bar = alphas_bar_sqrt**2  # Revert sqrt
     alphas = alphas_bar[1:] / alphas_bar[:-1]  # Revert cumprod
-    alphas = mx.cat([alphas_bar[0:1], alphas])
+    alphas = mx.concat([alphas_bar[0:1], alphas])
     betas = 1 - alphas
 
     return betas
 
 
-class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
+class MLXDDIMScheduler(MLXSchedulerMixin, ConfigMixin):
     """
-    MLX port of `DDPMScheduler` explores the connections between denoising score matching and Langevin dynamics sampling.
+    MLX port of `DDIMScheduler` extends the denoising procedure introduced in denoising diffusion probabilistic models (DDPMs) with
+    non-Markovian guidance.
 
-    This model inherits from [`MLXSchedulerMixin`] and [`ConfigMixin`]. Check the superclass documentation for the generic
+    This model inherits from [`SchedulerMixin`] and [`ConfigMixin`]. Check the superclass documentation for the generic
     methods the library implements for all schedulers such as loading and saving.
 
     Args:
@@ -143,14 +146,17 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
             The beta schedule, a mapping from a beta range to a sequence of betas for stepping the model. Choose from
             `linear`, `scaled_linear`, or `squaredcos_cap_v2`.
         trained_betas (`np.ndarray`, *optional*):
-            An array of betas to pass directly to the constructor without using `beta_start` and `beta_end`.
-        variance_type (`str`, defaults to `"fixed_small"`):
-            Clip the variance when adding noise to the denoised sample. Choose from `fixed_small`, `fixed_small_log`,
-            `fixed_large`, `fixed_large_log`, `learned` or `learned_range`.
+            Pass an array of betas directly to the constructor to bypass `beta_start` and `beta_end`.
         clip_sample (`bool`, defaults to `True`):
             Clip the predicted sample for numerical stability.
         clip_sample_range (`float`, defaults to 1.0):
             The maximum magnitude for sample clipping. Valid only when `clip_sample=True`.
+        set_alpha_to_one (`bool`, defaults to `True`):
+            Each diffusion step uses the alphas product value at that step and at the previous one. For the final step
+            there is no previous alpha. When this option is `True` the previous alpha product is fixed to `1`,
+            otherwise it uses the alpha value at step 0.
+        steps_offset (`int`, defaults to 0):
+            An offset added to the inference steps, as required by some model families.
         prediction_type (`str`, defaults to `epsilon`, *optional*):
             Prediction type of the scheduler function; can be `epsilon` (predicts the noise of the diffusion process),
             `sample` (directly predicts the noisy sample`) or `v_prediction` (see section 2.4 of [Imagen
@@ -165,8 +171,6 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
         timestep_spacing (`str`, defaults to `"leading"`):
             The way the timesteps should be scaled. Refer to Table 2 of the [Common Diffusion Noise Schedules and
             Sample Steps are Flawed](https://huggingface.co/papers/2305.08891) for more information.
-        steps_offset (`int`, defaults to 0):
-            An offset added to the inference steps, as required by some model families.
         rescale_betas_zero_snr (`bool`, defaults to `False`):
             Whether to rescale the betas to have zero terminal SNR. This enables the model to generate very bright and
             dark samples instead of limiting it to samples with medium brightness. Loosely related to
@@ -184,19 +188,19 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
         beta_end: float = 0.02,
         beta_schedule: str = "linear",
         trained_betas: Optional[Union[np.ndarray, List[float]]] = None,
-        variance_type: str = "fixed_small",
         clip_sample: bool = True,
+        set_alpha_to_one: bool = True,
+        steps_offset: int = 0,
         prediction_type: str = "epsilon",
         thresholding: bool = False,
         dynamic_thresholding_ratio: float = 0.995,
         clip_sample_range: float = 1.0,
         sample_max_value: float = 1.0,
         timestep_spacing: str = "leading",
-        steps_offset: int = 0,
         rescale_betas_zero_snr: bool = False,
     ):
         if trained_betas is not None:
-            self.betas = mx.tensor(trained_betas, dtype=mx.float32)
+            self.betas = mx.array(trained_betas, dtype=mx.float32)
         elif beta_schedule == "linear":
             self.betas = mx.linspace(beta_start, beta_end, num_train_timesteps, dtype=mx.float32)
         elif beta_schedule == "scaled_linear":
@@ -205,10 +209,6 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
         elif beta_schedule == "squaredcos_cap_v2":
             # Glide cosine schedule
             self.betas = betas_for_alpha_bar(num_train_timesteps)
-        elif beta_schedule == "sigmoid":
-            # GeoDiff sigmoid schedule
-            betas = mx.linspace(-6, 6, num_train_timesteps)
-            self.betas = mx.sigmoid(betas) * (beta_end - beta_start) + beta_start
         else:
             raise NotImplementedError(f"{beta_schedule} is not implemented for {self.__class__}")
 
@@ -218,17 +218,19 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
 
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = mx.cumprod(self.alphas, axis=0)
-        self.one = mx.array(1.0)
+
+        # At every step in ddim, we are looking into the previous alphas_cumprod
+        # For the final step, there is no previous alphas_cumprod because we are already at 0
+        # `set_alpha_to_one` decides whether we set this parameter simply to one or
+        # whether we use the final alpha of the "non-previous" one.
+        self.final_alpha_cumprod = mx.array(1.0) if set_alpha_to_one else self.alphas_cumprod[0]
 
         # standard deviation of the initial noise distribution
         self.init_noise_sigma = 1.0
 
         # setable values
-        self.custom_timesteps = False
         self.num_inference_steps = None
-        self.timesteps = mx.arange(0, num_train_timesteps)[::-1]
-
-        self.variance_type = variance_type
+        self.timesteps = mx.arange(0, num_train_timesteps, dtype=mx.int64)[::-1]
 
     def scale_model_input(self, sample: mx.array, timestep: Optional[int] = None) -> mx.array:
         """
@@ -247,120 +249,17 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
         """
         return sample
 
-    def set_timesteps(
-        self,
-        num_inference_steps: Optional[int] = None,
-        timesteps: Optional[List[int]] = None,
-    ):
-        """
-        Sets the discrete timesteps used for the diffusion chain (to be run before inference).
+    def _get_variance(self, timestep, prev_timestep):
+        alpha_prod_t = self.alphas_cumprod[timestep]
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.final_alpha_cumprod
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
 
-        Args:
-            num_inference_steps (`int`):
-                The number of diffusion steps used when generating samples with a pre-trained model. If used,
-                `timesteps` must be `None`.
-            timesteps (`List[int]`, *optional*):
-                Custom timesteps used to support arbitrary spacing between timesteps. If `None`, then the default
-                timestep spacing strategy of equal spacing between timesteps is used. If `timesteps` is passed,
-                `num_inference_steps` must be `None`.
-
-        """
-        if num_inference_steps is not None and timesteps is not None:
-            raise ValueError("Can only pass one of `num_inference_steps` or `custom_timesteps`.")
-
-        if timesteps is not None:
-            for i in range(1, len(timesteps)):
-                if timesteps[i] >= timesteps[i - 1]:
-                    raise ValueError("`custom_timesteps` must be in descending order.")
-
-            if timesteps[0] >= self.config.num_train_timesteps:
-                raise ValueError(
-                    f"`timesteps` must start before `self.config.train_timesteps`:"
-                    f" {self.config.num_train_timesteps}."
-                )
-
-            timesteps = np.array(timesteps, dtype=np.int64)
-            self.custom_timesteps = True
-        else:
-            if num_inference_steps > self.config.num_train_timesteps:
-                raise ValueError(
-                    f"`num_inference_steps`: {num_inference_steps} cannot be larger than `self.config.train_timesteps`:"
-                    f" {self.config.num_train_timesteps} as the unet model trained with this scheduler can only handle"
-                    f" maximal {self.config.num_train_timesteps} timesteps."
-                )
-
-            self.num_inference_steps = num_inference_steps
-            self.custom_timesteps = False
-
-            # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
-            if self.config.timestep_spacing == "linspace":
-                timesteps = (
-                    np.linspace(0, self.config.num_train_timesteps - 1, num_inference_steps)
-                    .round()[::-1]
-                    .copy()
-                    .astype(np.int64)
-                )
-            elif self.config.timestep_spacing == "leading":
-                step_ratio = self.config.num_train_timesteps // self.num_inference_steps
-                # creates integer timesteps by multiplying by ratio
-                # casting to int to avoid issues when num_inference_step is power of 3
-                timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].copy().astype(np.int64)
-                timesteps += self.config.steps_offset
-            elif self.config.timestep_spacing == "trailing":
-                step_ratio = self.config.num_train_timesteps / self.num_inference_steps
-                # creates integer timesteps by multiplying by ratio
-                # casting to int to avoid issues when num_inference_step is power of 3
-                timesteps = np.round(np.arange(self.config.num_train_timesteps, 0, -step_ratio)).astype(np.int64)
-                timesteps -= 1
-            else:
-                raise ValueError(
-                    f"{self.config.timestep_spacing} is not supported. Please make sure to choose one of 'linspace', 'leading' or 'trailing'."
-                )
-
-        self.timesteps = mx.array(timesteps, dtype=mx.int64)
-
-    def _get_variance(self, t, predicted_variance=None, variance_type=None):
-        prev_t = self.previous_timestep(t)
-
-        alpha_prod_t = self.alphas_cumprod[t]
-        alpha_prod_t_prev = self.alphas_cumprod[prev_t] if prev_t >= 0 else self.one
-        current_beta_t = 1 - alpha_prod_t / alpha_prod_t_prev
-
-        # For t > 0, compute predicted variance βt (see formula (6) and (7) from https://arxiv.org/pdf/2006.11239.pdf)
-        # and sample from it to get previous sample
-        # x_{t-1} ~ N(pred_prev_sample, variance) == add variance to pred_sample
-        variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
-
-        # we always take the log of variance, so clamp it to ensure it's not 0
-        variance = np.array(variance)
-        variance = np.clip(variance, a_min=1e-20, a_max=None)
-        variance = mx.array(variance)
-
-        if variance_type is None:
-            variance_type = self.config.variance_type
-
-        # hacks - were probably added for training stability
-        if variance_type == "fixed_small":
-            variance = variance
-        # for rl-diffuser https://arxiv.org/abs/2205.09991
-        elif variance_type == "fixed_small_log":
-            variance = mx.log(variance)
-            variance = mx.exp(0.5 * variance)
-        elif variance_type == "fixed_large":
-            variance = current_beta_t
-        elif variance_type == "fixed_large_log":
-            # Glide max_log
-            variance = mx.log(current_beta_t)
-        elif variance_type == "learned":
-            return predicted_variance
-        elif variance_type == "learned_range":
-            min_log = mx.log(variance)
-            max_log = mx.log(current_beta_t)
-            frac = (predicted_variance + 1) / 2
-            variance = frac * max_log + (1 - frac) * min_log
+        variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
 
         return variance
 
+    # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler._threshold_sample
     def _threshold_sample(self, sample: mx.array) -> mx.array:
         """
         "Dynamic thresholding: At each sampling step we set s to a certain percentile absolute pixel value in xt0 (the
@@ -374,16 +273,15 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
         dtype = sample.dtype
         batch_size, channels, *remaining_dims = sample.shape
 
-        # if dtype not in (mx.float32, mx.float64):
-        #     sample = sample.astype(mx.float32)
+        if dtype not in (mx.float32, mx.float64):
+            sample = sample.astype(mx.float32)
 
         # Flatten sample for doing quantile calculation along each image
-        sample = np.array(sample)
-        sample = sample.reshape(batch_size, channels * np.prod(remaining_dims))
+        sample = mx.array(sample.reshape(batch_size, channels * np.prod(remaining_dims)))
 
-        abs_sample = sample.abs()  # "a certain percentile absolute pixel value"
+        abs_sample = np.array(sample.abs())  # "a certain percentile absolute pixel value"
 
-        s = mx.array(np.quantile(abs_sample, self.config.dynamic_thresholding_ratio, 1))
+        s = mx.array(np.quantile(abs_sample, self.config.dynamic_thresholding_ratio, dim=1))
         s = mx.clip(
             s, a_min=1, a_max=self.config.sample_max_value
         )  # When clamped to min=1, equivalent to standard clipping to [-1, 1]
@@ -394,14 +292,61 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
 
         return sample
 
+    def set_timesteps(self, num_inference_steps: int):
+        """
+        Sets the discrete timesteps used for the diffusion chain (to be run before inference).
+
+        Args:
+            num_inference_steps (`int`):
+                The number of diffusion steps used when generating samples with a pre-trained model.
+        """
+
+        if num_inference_steps > self.config.num_train_timesteps:
+            raise ValueError(
+                f"`num_inference_steps`: {num_inference_steps} cannot be larger than `self.config.train_timesteps`:"
+                f" {self.config.num_train_timesteps} as the unet model trained with this scheduler can only handle"
+                f" maximal {self.config.num_train_timesteps} timesteps."
+            )
+
+        self.num_inference_steps = num_inference_steps
+
+        # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
+        if self.config.timestep_spacing == "linspace":
+            timesteps = (
+                np.linspace(0, self.config.num_train_timesteps - 1, num_inference_steps)
+                .round()[::-1]
+                .copy()
+                .astype(np.int64)
+            )
+        elif self.config.timestep_spacing == "leading":
+            step_ratio = self.config.num_train_timesteps // self.num_inference_steps
+            # creates integer timesteps by multiplying by ratio
+            # casting to int to avoid issues when num_inference_step is power of 3
+            timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].copy().astype(np.int64)
+            timesteps += self.config.steps_offset
+        elif self.config.timestep_spacing == "trailing":
+            step_ratio = self.config.num_train_timesteps / self.num_inference_steps
+            # creates integer timesteps by multiplying by ratio
+            # casting to int to avoid issues when num_inference_step is power of 3
+            timesteps = np.round(np.arange(self.config.num_train_timesteps, 0, -step_ratio)).astype(np.int64)
+            timesteps -= 1
+        else:
+            raise ValueError(
+                f"{self.config.timestep_spacing} is not supported. Please make sure to choose one of 'leading' or 'trailing'."
+            )
+
+        self.timesteps = mx.array(timesteps)
+
     def step(
         self,
         model_output: mx.array,
         timestep: int,
         sample: mx.array,
-        key=None,
+        eta: float = 0.0,
+        use_clipped_model_output: bool = False,
+        variance_noise: Optional[mx.array] = None,
         return_dict: bool = True,
-    ) -> Union[MLXDDPMSchedulerOutput, Tuple]:
+    ) -> Union[MLXDDIMSchedulerOutput, Tuple]:
         """
         Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
         process from the learned model outputs (most often the predicted noise).
@@ -413,82 +358,107 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
                 The current discrete timestep in the diffusion chain.
             sample (`mx.array`):
                 A current instance of a sample created by the diffusion process.
+            eta (`float`):
+                The weight of noise for added noise in diffusion step.
+            use_clipped_model_output (`bool`, defaults to `False`):
+                If `True`, computes "corrected" `model_output` from the clipped predicted original sample. Necessary
+                because predicted original sample is clipped to [-1, 1] when `self.config.clip_sample` is `True`. If no
+                clipping has happened, "corrected" `model_output` would coincide with the one provided as input and
+                `use_clipped_model_output` has no effect.
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            variance_noise (`mx.array`):
+                Alternative to generating noise with `generator` by directly providing the noise for the variance
+                itself. Useful for methods such as [`CycleDiffusion`].
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~schedulers.scheduling_ddpm.MLXDDPMSchedulerOutput`] or `tuple`.
+                Whether or not to return a [`~schedulers.scheduling_ddim.DDIMSchedulerOutput`] or `tuple`.
 
         Returns:
-            [`~schedulers.scheduling_ddpm.MLXDDPMSchedulerOutput`] or `tuple`:
-                If return_dict is `True`, [`~schedulers.scheduling_ddpm.MLXDDPMSchedulerOutput`] is returned, otherwise a
+            [`~schedulers.scheduling_ddim.DDIMSchedulerOutput`] or `tuple`:
+                If return_dict is `True`, [`~schedulers.scheduling_ddim.DDIMSchedulerOutput`] is returned, otherwise a
                 tuple is returned where the first element is the sample tensor.
 
         """
-        t = timestep
-
-        prev_t = self.previous_timestep(t)
-
-        if model_output.shape[1] == sample.shape[1] * 2 and self.variance_type in ["learned", "learned_range"]:
-            model_output, predicted_variance = mx.split(model_output, sample.shape[1], axis=1)
-        else:
-            predicted_variance = None
-
-        # 1. compute alphas, betas
-        alpha_prod_t = self.alphas_cumprod[t]
-        alpha_prod_t_prev = self.alphas_cumprod[prev_t] if prev_t >= 0 else self.one
-        beta_prod_t = 1 - alpha_prod_t
-        beta_prod_t_prev = 1 - alpha_prod_t_prev
-        current_alpha_t = alpha_prod_t / alpha_prod_t_prev
-        current_beta_t = 1 - current_alpha_t
-
-        # 2. compute predicted original sample from predicted noise also called
-        # "predicted x_0" of formula (15) from https://arxiv.org/pdf/2006.11239.pdf
-        if self.config.prediction_type == "epsilon":
-            pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
-        elif self.config.prediction_type == "sample":
-            pred_original_sample = model_output
-        elif self.config.prediction_type == "v_prediction":
-            pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
-        else:
+        if self.num_inference_steps is None:
             raise ValueError(
-                f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample` or"
-                " `v_prediction`  for the DDPMScheduler."
+                "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
             )
 
-        # 3. Clip or threshold "predicted x_0"
+        # See formulas (12) and (16) of DDIM paper https://arxiv.org/pdf/2010.02502.pdf
+        # Ideally, read DDIM paper in-detail understanding
+
+        # Notation (<variable name> -> <name in paper>
+        # - pred_noise_t -> e_theta(x_t, t)
+        # - pred_original_sample -> f_theta(x_t, t) or x_0
+        # - std_dev_t -> sigma_t
+        # - eta -> η
+        # - pred_sample_direction -> "direction pointing to x_t"
+        # - pred_prev_sample -> "x_t-1"
+
+        # 1. get previous step value (=t-1)
+        prev_timestep = timestep - self.config.num_train_timesteps // self.num_inference_steps
+
+        # 2. compute alphas, betas
+        alpha_prod_t = self.alphas_cumprod[timestep]
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.final_alpha_cumprod
+
+        beta_prod_t = 1 - alpha_prod_t
+
+        # 3. compute predicted original sample from predicted noise also called
+        # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        if self.config.prediction_type == "epsilon":
+            pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+            pred_epsilon = model_output
+        elif self.config.prediction_type == "sample":
+            pred_original_sample = model_output
+            pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
+        elif self.config.prediction_type == "v_prediction":
+            pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
+            pred_epsilon = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample`, or"
+                " `v_prediction`"
+            )
+
+        # 4. Clip or threshold "predicted x_0"
         if self.config.thresholding:
             pred_original_sample = self._threshold_sample(pred_original_sample)
         elif self.config.clip_sample:
-            pred_original_sample = mx.clip(
-                pred_original_sample, -self.config.clip_sample_range, self.config.clip_sample_range
+            pred_original_sample = mx.clip(pred_original_sample,
+                -self.config.clip_sample_range, self.config.clip_sample_range
             )
 
-        # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
-        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
-        pred_original_sample_coeff = (alpha_prod_t_prev ** (0.5) * current_beta_t) / beta_prod_t
-        current_sample_coeff = current_alpha_t ** (0.5) * beta_prod_t_prev / beta_prod_t
+        # 5. compute variance: "sigma_t(η)" -> see formula (16)
+        # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
+        variance = self._get_variance(timestep, prev_timestep)
+        std_dev_t = eta * variance ** (0.5)
 
-        # 5. Compute predicted previous sample µ_t
-        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
-        pred_prev_sample = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
+        if use_clipped_model_output:
+            # the pred_epsilon is always re-derived from the clipped x_0 in Glide
+            pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
 
-        # 6. Add noise
-        variance = 0
-        if t > 0:
-            variance_noise = mx.random.normal(model_output.shape,dtype=model_output.dtype, key=key)
-            if self.variance_type == "fixed_small_log":
-                variance = self._get_variance(t, predicted_variance=predicted_variance) * variance_noise
-            elif self.variance_type == "learned_range":
-                variance = self._get_variance(t, predicted_variance=predicted_variance)
-                variance = mx.exp(0.5 * variance) * variance_noise
-            else:
-                variance = (self._get_variance(t, predicted_variance=predicted_variance) ** 0.5) * variance_noise
+        # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
 
-        pred_prev_sample = pred_prev_sample + variance
+        # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
+
+        if eta > 0:
+            if variance_noise is None:
+                variance_noise = mx.random.normal(
+                    model_output.shape,dtype=model_output.dtype
+                )
+            variance = std_dev_t * variance_noise
+
+            prev_sample = prev_sample + variance
 
         if not return_dict:
-            return (pred_prev_sample,)
+            return (prev_sample,)
 
-        return MLXDDPMSchedulerOutput(prev_sample=pred_prev_sample, pred_original_sample=pred_original_sample)
+        return MLXDDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
+    # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler.add_noise
     def add_noise(
         self,
         original_samples: mx.array,
@@ -509,6 +479,7 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
         noisy_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
         return noisy_samples
 
+    # Copied from diffusers.schedulers.scheduling_ddpm.DDPMScheduler.get_velocity
     def get_velocity(self, sample: mx.array, noise: mx.array, timesteps: mx.array) -> mx.array:
         alphas_cumprod = self.alphas_cumprod
 
@@ -525,18 +496,3 @@ class MLXDDPMScheduler(MLXSchedulerMixin, ConfigMixin):
 
     def __len__(self):
         return self.config.num_train_timesteps
-
-    def previous_timestep(self, timestep):
-        if self.custom_timesteps:
-            index = (np.array(self.timesteps) == timestep).nonzero(as_tuple=True)[0][0]
-            if index == self.timesteps.shape[0] - 1:
-                prev_t = mx.array(-1)
-            else:
-                prev_t = self.timesteps[index + 1]
-        else:
-            num_inference_steps = (
-                self.num_inference_steps if self.num_inference_steps else self.config.num_train_timesteps
-            )
-            prev_t = timestep - self.config.num_train_timesteps // num_inference_steps
-
-        return prev_t

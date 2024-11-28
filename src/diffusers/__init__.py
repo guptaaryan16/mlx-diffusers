@@ -537,6 +537,7 @@ else:
         [
             "MLXDDPMScheduler",
             "MLXEulerDiscreteScheduler",
+            "MLXDDIMScheduler"
         ]
     )
     _import_structure["models.modeling_mlx_utils"] = ["MLXModelMixin"]
@@ -948,7 +949,22 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             FlaxStableDiffusionPipeline,
             FlaxStableDiffusionXLPipeline,
         )
-
+    
+    try:
+        if not is_mlx_available():
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        from .utils.dummy_mlx_objects import *  # noqa F403
+    else:
+        from .models.modeling_mlx_utils import MLXModelMixin
+        from .models.unets.unet_2d_condition_mlx import MLXUNet2DConditionModel
+        from .models.vae_mlx import MLXAutoencoderKL
+        from .schedulers import (
+            MLXDDIMScheduler,
+            MLXDDPMScheduler,
+            MLXEulerDiscreteScheduler
+        )
+    
     try:
         if not (is_note_seq_available()):
             raise OptionalDependencyNotAvailable()

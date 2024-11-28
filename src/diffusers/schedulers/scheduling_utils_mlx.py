@@ -12,17 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib
-import math
 import os
-from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple, Union
+from typing import Optional, Union, Tuple
 
-import mlx.nn as nn
 import mlx.core as mx
 
 from huggingface_hub.utils import validate_hf_hub_args
-from ..utils import BaseOutput, PushToHubMixin
+from ..utils import PushToHubMixin
 
 
 SCHEDULER_CONFIG_NAME = "scheduler_config.json"
@@ -35,38 +32,35 @@ SCHEDULER_CONFIG_NAME = "scheduler_config.json"
 class MLXKarrasDiffusionSchedulers(Enum):
     MLXDDIMScheduler = 1
     MLXDDPMScheduler = 2
-    MLXPNDMScheduler = 3
-    MLXLMSDiscreteScheduler = 4
-    MLXDPMSolverMultistepScheduler = 5
-    MLXEulerDiscreteScheduler = 6
+    MLXEulerDiscreteScheduler = 3
 
 
-@dataclass
-class MLXSchedulerOutput(BaseOutput):
-    """
-    Base class for the scheduler's step function output.
-
-    Args:
-        prev_sample (`mx.array` of shape `(batch_size, num_channels, height, width)` for images):
-            Computed sample (x_{t-1}) of previous timestep. `prev_sample` should be used as next model input in the
-            denoising loop.
-    """
-
-    prev_sample: mx.array
+AysSchedules = {
+    "StableDiffusionTimesteps": [999, 850, 736, 645, 545, 455, 343, 233, 124, 24],
+    "StableDiffusionSigmas": [14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.0],
+    "StableDiffusionXLTimesteps": [999, 845, 730, 587, 443, 310, 193, 116, 53, 13],
+    "StableDiffusionXLSigmas": [14.615, 6.315, 3.771, 2.181, 1.342, 0.862, 0.555, 0.380, 0.234, 0.113, 0.0],
+    "StableDiffusionVideoSigmas": [700.00, 54.5, 15.886, 7.977, 4.248, 1.789, 0.981, 0.403, 0.173, 0.034, 0.0],
+}
 
 
 class MLXSchedulerMixin(PushToHubMixin):
     """
-    Mixin containing common functions for the schedulers.
+    Base class for all schedulers.
+
+    [`SchedulerMixin`] contains common functions shared by all schedulers such as general loading and saving
+    functionalities.
+
+    [`ConfigMixin`] takes care of storing the configuration attributes (like `num_train_timesteps`) that are passed to
+    the scheduler's `__init__` function, and the attributes can be accessed by `scheduler.config.num_train_timesteps`.
 
     Class attributes:
-        - **_compatibles** (`List[str]`) -- A list of classes that are compatible with the parent class, so that
-          `from_config` can be used from a class different than the one used to save the config (should be overridden
+        - **_compatibles** (`List[str]`) -- A list of scheduler classes that are compatible with the parent scheduler
+          class. Use [`~ConfigMixin.from_config`] to load a different compatible scheduler class (should be overridden
           by parent class).
     """
 
     config_name = SCHEDULER_CONFIG_NAME
-    ignore_for_config = ["dtype"]
     _compatibles = []
     has_compatibles = True
 
@@ -80,88 +74,65 @@ class MLXSchedulerMixin(PushToHubMixin):
         **kwargs,
     ):
         r"""
-        Instantiate a Scheduler class from a pre-defined JSON-file.
+        Instantiate a scheduler from a pre-defined JSON configuration file in a local directory or Hub repository.
 
         Parameters:
             pretrained_model_name_or_path (`str` or `os.PathLike`, *optional*):
                 Can be either:
 
-                    - A string, the *model id* of a model repo on huggingface.co. Valid model ids should have an
-                      organization name, like `google/ddpm-celebahq-256`.
-                    - A path to a *directory* containing model weights saved using [`~SchedulerMixin.save_pretrained`],
-                      e.g., `./my_model_directory/`.
+                    - A string, the *model id* (for example `google/ddpm-celebahq-256`) of a pretrained model hosted on
+                      the Hub.
+                    - A path to a *directory* (for example `./my_model_directory`) containing the scheduler
+                      configuration saved with [`~SchedulerMixin.save_pretrained`].
             subfolder (`str`, *optional*):
-                In case the relevant files are located inside a subfolder of the model repo (either remote in
-                huggingface.co or downloaded locally), you can specify the folder name here.
+                The subfolder location of a model file within a larger model repository on the Hub or locally.
             return_unused_kwargs (`bool`, *optional*, defaults to `False`):
                 Whether kwargs that are not consumed by the Python class should be returned or not.
-
             cache_dir (`Union[str, os.PathLike]`, *optional*):
-                Path to a directory in which a downloaded pretrained model configuration should be cached if the
-                standard cache should not be used.
+                Path to a directory where a downloaded pretrained model configuration is cached if the standard cache
+                is not used.
             force_download (`bool`, *optional*, defaults to `False`):
                 Whether or not to force the (re-)download of the model weights and configuration files, overriding the
                 cached versions if they exist.
 
             proxies (`Dict[str, str]`, *optional*):
-                A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
+                A dictionary of proxy servers to use by protocol or endpoint, for example, `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
             output_loading_info(`bool`, *optional*, defaults to `False`):
                 Whether or not to also return a dictionary containing missing keys, unexpected keys and error messages.
             local_files_only(`bool`, *optional*, defaults to `False`):
-                Whether or not to only look at local files (i.e., do not try to download the model).
+                Whether to only load local model weights and configuration files or not. If set to `True`, the model
+                won't be downloaded from the Hub.
             token (`str` or *bool*, *optional*):
-                The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
-                when running `transformers-cli login` (stored in `~/.huggingface`).
+                The token to use as HTTP bearer authorization for remote files. If `True`, the token generated from
+                `diffusers-cli login` (stored in `~/.huggingface`) is used.
             revision (`str`, *optional*, defaults to `"main"`):
-                The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
-                git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
-                identifier allowed by git.
+                The specific model version to use. It can be a branch name, a tag name, a commit id, or any identifier
+                allowed by Git.
 
         <Tip>
 
-         It is required to be logged in (`huggingface-cli login`) when you want to use private or [gated
-         models](https://huggingface.co/docs/hub/models-gated#gated-models).
-
-        </Tip>
-
-        <Tip>
-
-        Activate the special ["offline-mode"](https://huggingface.co/transformers/installation.html#offline-mode) to
-        use this method in a firewalled environment.
+        To use private or [gated models](https://huggingface.co/docs/hub/models-gated#gated-models), log-in with
+        `huggingface-cli login`. You can also activate the special
+        ["offline-mode"](https://huggingface.co/diffusers/installation.html#offline-mode) to use this method in a
+        firewalled environment.
 
         </Tip>
 
         """
-        config, kwargs = cls.load_config(
+        config, kwargs, commit_hash = cls.load_config(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             subfolder=subfolder,
             return_unused_kwargs=True,
+            return_commit_hash=True,
             **kwargs,
         )
-        scheduler, unused_kwargs = cls.from_config(
-            config, return_unused_kwargs=True, **kwargs
-        )
+        return cls.from_config(config, return_unused_kwargs=return_unused_kwargs, **kwargs)
 
-        if hasattr(scheduler, "create_state") and getattr(
-            scheduler, "has_state", False
-        ):
-            state = scheduler.create_state()
-
-        if return_unused_kwargs:
-            return scheduler, state, unused_kwargs
-
-        return scheduler, state
-
-    def save_pretrained(
-        self,
-        save_directory: Union[str, os.PathLike],
-        push_to_hub: bool = False,
-        **kwargs,
-    ):
+    def save_pretrained(self, save_directory: Union[str, os.PathLike], push_to_hub: bool = False, **kwargs):
         """
-        Save a scheduler configuration object to the directory `save_directory`, so that it can be re-loaded using the
-        [`~MLXSchedulerMixin.from_pretrained`] class method.
+        Save a scheduler configuration object to a directory so that it can be reloaded using the
+        [`~SchedulerMixin.from_pretrained`] class method.
 
         Args:
             save_directory (`str` or `os.PathLike`):
@@ -173,9 +144,7 @@ class MLXSchedulerMixin(PushToHubMixin):
             kwargs (`Dict[str, Any]`, *optional*):
                 Additional keyword arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
-        self.save_config(
-            save_directory=save_directory, push_to_hub=push_to_hub, **kwargs
-        )
+        self.save_config(save_directory=save_directory, push_to_hub=push_to_hub, **kwargs)
 
     @property
     def compatibles(self):
@@ -192,9 +161,7 @@ class MLXSchedulerMixin(PushToHubMixin):
         compatible_classes_str = list(set([cls.__name__] + cls._compatibles))
         diffusers_library = importlib.import_module(__name__.split(".")[0])
         compatible_classes = [
-            getattr(diffusers_library, c)
-            for c in compatible_classes_str
-            if hasattr(diffusers_library, c)
+            getattr(diffusers_library, c) for c in compatible_classes_str if hasattr(diffusers_library, c)
         ]
         return compatible_classes
 
@@ -202,136 +169,3 @@ class MLXSchedulerMixin(PushToHubMixin):
 def broadcast_to_shape_from_left(x: mx.array, shape: Tuple[int]) -> mx.array:
     assert len(shape) >= x.ndim
     return mx.broadcast_to(mx.reshape(x, x.shape + (1,) * (len(shape) - x.ndim)), shape)
-
-
-def betas_for_alpha_bar(
-    num_diffusion_timesteps: int, max_beta=0.999, dtype=mx.float32
-) -> mx.array:
-    """
-    Create a beta schedule that discretizes the given alpha_t_bar function, which defines the cumulative product of
-    (1-beta) over time from t = [0,1].
-
-    Contains a function alpha_bar that takes an argument t and transforms it to the cumulative product of (1-beta) up
-    to that part of the diffusion process.
-
-
-    Args:
-        num_diffusion_timesteps (`int`): the number of betas to produce.
-        max_beta (`float`): the maximum beta to use; use values lower than 1 to
-                     prevent singularities.
-
-    Returns:
-        betas (`mx.array`): the betas used by the scheduler to step the model outputs
-    """
-
-    def alpha_bar(time_step):
-        return math.cos((time_step + 0.008) / 1.008 * math.pi / 2) ** 2
-
-    betas = []
-    for i in range(num_diffusion_timesteps):
-        t1 = i / num_diffusion_timesteps
-        t2 = (i + 1) / num_diffusion_timesteps
-        betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
-    return mx.array(betas, dtype=dtype)
-
-
-@dataclass
-class CommonSchedulerState:
-    alphas: mx.array
-    betas: mx.array
-    alphas_cumprod: mx.array
-
-    @classmethod
-    def create(cls, scheduler):
-        config = scheduler.config
-
-        if config.trained_betas is not None:
-            betas = mx.array(config.trained_betas, dtype=scheduler.dtype)
-        elif config.beta_schedule == "linear":
-            betas = mx.linspace(
-                config.beta_start,
-                config.beta_end,
-                config.num_train_timesteps,
-                dtype=scheduler.dtype,
-            )
-        elif config.beta_schedule == "scaled_linear":
-            # this schedule is very specific to the latent diffusion model.
-            betas = (
-                mx.linspace(
-                    config.beta_start**0.5,
-                    config.beta_end**0.5,
-                    config.num_train_timesteps,
-                    dtype=scheduler.dtype,
-                )
-                ** 2
-            )
-        elif config.beta_schedule == "squaredcos_cap_v2":
-            # Glide cosine schedule
-            betas = betas_for_alpha_bar(
-                config.num_train_timesteps, dtype=scheduler.dtype
-            )
-        else:
-            raise NotImplementedError(
-                f"beta_schedule {config.beta_schedule} is not implemented for scheduler {scheduler.__class__.__name__}"
-            )
-
-        alphas = 1.0 - betas
-
-        alphas_cumprod = mx.cumprod(alphas, axis=0)
-
-        return cls(
-            alphas=alphas,
-            betas=betas,
-            alphas_cumprod=alphas_cumprod,
-        )
-
-
-def get_sqrt_alpha_prod(
-    state: CommonSchedulerState,
-    original_samples: mx.array,
-    noise: mx.array,
-    timesteps: mx.array,
-):
-    alphas_cumprod = state.alphas_cumprod
-
-    sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
-    sqrt_alpha_prod = sqrt_alpha_prod.flatten()
-    sqrt_alpha_prod = broadcast_to_shape_from_left(
-        sqrt_alpha_prod, original_samples.shape
-    )
-
-    sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
-    sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
-    sqrt_one_minus_alpha_prod = broadcast_to_shape_from_left(
-        sqrt_one_minus_alpha_prod, original_samples.shape
-    )
-
-    return sqrt_alpha_prod, sqrt_one_minus_alpha_prod
-
-
-def add_noise_common(
-    state: CommonSchedulerState,
-    original_samples: mx.array,
-    noise: mx.array,
-    timesteps: mx.array,
-):
-    sqrt_alpha_prod, sqrt_one_minus_alpha_prod = get_sqrt_alpha_prod(
-        state, original_samples, noise, timesteps
-    )
-    noisy_samples = (
-        sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
-    )
-    return noisy_samples
-
-
-def get_velocity_common(
-    state: CommonSchedulerState,
-    sample: mx.array,
-    noise: mx.array,
-    timesteps: mx.array,
-):
-    sqrt_alpha_prod, sqrt_one_minus_alpha_prod = get_sqrt_alpha_prod(
-        state, sample, noise, timesteps
-    )
-    velocity = sqrt_alpha_prod * noise - sqrt_one_minus_alpha_prod * sample
-    return velocity

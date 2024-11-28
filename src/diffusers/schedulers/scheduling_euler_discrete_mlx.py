@@ -13,55 +13,145 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
+import math
 
+from ..utils import BaseOutput, is_scipy_available, logging
 from ..configuration_utils import ConfigMixin, register_to_config
 from .scheduling_utils_mlx import (
-    CommonSchedulerState,
     MLXKarrasDiffusionSchedulers,
     MLXSchedulerMixin,
-    MLXSchedulerOutput,
-    broadcast_to_shape_from_left,
+    broadcast_to_shape_from_left
 )
 
-@dataclass
-class EulerDiscreteSchedulerState:
-    common: CommonSchedulerState
+if is_scipy_available():
+    import scipy.stats
 
-    # setable values
-    init_noise_sigma: mx.array
-    timesteps: mx.array
-    sigmas: mx.array
-    num_inference_steps: Optional[int] = None
-
-    @classmethod
-    def create(
-        cls,
-        common: CommonSchedulerState,
-        init_noise_sigma: mx.array,
-        timesteps: mx.array,
-        sigmas: mx.array,
-    ):
-        return cls(
-            common=common,
-            init_noise_sigma=init_noise_sigma,
-            timesteps=timesteps,
-            sigmas=sigmas,
-        )
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 @dataclass
-class MLXEulerDiscreteSchedulerOutput(MLXSchedulerOutput):
-    state: EulerDiscreteSchedulerState
+# Copied from diffusers.schedulers.scheduling_ddpm.DDPMSchedulerOutput with DDPM->EulerDiscrete
+class MLXEulerDiscreteSchedulerOutput(BaseOutput):
+    """
+    Output class for the scheduler's `step` function output.
+
+    Args:
+        prev_sample (`mx.array` of shape `(batch_size, num_channels, height, width)` for images):
+            Computed sample `(x_{t-1})` of previous timestep. `prev_sample` should be used as next model input in the
+            denoising loop.
+        pred_original_sample (`mx.array` of shape `(batch_size, num_channels, height, width)` for images):
+            The predicted denoised sample `(x_{0})` based on the model output from the current timestep.
+            `pred_original_sample` can be used to preview progress or for guidance.
+    """
+
+    prev_sample: mx.array
+    pred_original_sample: Optional[mx.array] = None
+
+
+
+# Copied from diffusers.schedulers.scheduling_ddpm.betas_for_alpha_bar
+def betas_for_alpha_bar(
+    num_diffusion_timesteps,
+    max_beta=0.999,
+    alpha_transform_type="cosine",
+):
+    """
+    Create a beta schedule that discretizes the given alpha_t_bar function, which defines the cumulative product of
+    (1-beta) over time from t = [0,1].
+
+    Contains a function alpha_bar that takes an argument t and transforms it to the cumulative product of (1-beta) up
+    to that part of the diffusion process.
+
+
+    Args:
+        num_diffusion_timesteps (`int`): the number of betas to produce.
+        max_beta (`float`): the maximum beta to use; use values lower than 1 to
+                     prevent singularities.
+        alpha_transform_type (`str`, *optional*, default to `cosine`): the type of noise schedule for alpha_bar.
+                     Choose from `cosine` or `exp`
+
+    Returns:
+        betas (`mx.array`): the betas used by the scheduler to step the model outputs
+    """
+    if alpha_transform_type == "cosine":
+
+        def alpha_bar_fn(t):
+            return math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
+
+    elif alpha_transform_type == "exp":
+
+        def alpha_bar_fn(t):
+            return math.exp(t * -12.0)
+
+    else:
+        raise ValueError(f"Unsupported alpha_transform_type: {alpha_transform_type}")
+
+    betas = []
+    for i in range(num_diffusion_timesteps):
+        t1 = i / num_diffusion_timesteps
+        t2 = (i + 1) / num_diffusion_timesteps
+        betas.append(min(1 - alpha_bar_fn(t2) / alpha_bar_fn(t1), max_beta))
+    return mx.array(betas, dtype=mx.float32)
+
+
+# Copied from diffusers.schedulers.scheduling_ddim.rescale_zero_terminal_snr
+def rescale_zero_terminal_snr(betas):
+    """
+    Rescales betas to have zero terminal SNR Based on https://arxiv.org/pdf/2305.08891.pdf (Algorithm 1)
+
+
+    Args:
+        betas (`mx.array`):
+            the betas that the scheduler is being initialized with.
+
+    Returns:
+        `mx.array`: rescaled betas with zero terminal SNR
+    """
+    # Convert betas to alphas_bar_sqrt
+    alphas = 1.0 - betas
+    alphas_cumprod = mx.cumprod(alphas, dim=0)
+    alphas_bar_sqrt = mx.sqrt(alphas_cumprod)
+
+    # Store old values.
+    alphas_bar_sqrt_0 = alphas_bar_sqrt[0]
+    alphas_bar_sqrt_T = alphas_bar_sqrt[-1]
+
+    # Shift so the last timestep is zero.
+    alphas_bar_sqrt -= alphas_bar_sqrt_T
+
+    # Scale so the first timestep is back to the old value.
+    alphas_bar_sqrt *= alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
+
+    # Convert alphas_bar_sqrt to betas
+    alphas_bar = alphas_bar_sqrt**2  # Revert sqrt
+    alphas = alphas_bar[1:] / alphas_bar[:-1]  # Revert cumprod
+    alphas = mx.concat([alphas_bar[0:1], alphas])
+    betas = 1 - alphas
+
+    return betas
+
+
+def get_sqrt_alpha_prod(
+    alphas_cumprod: mx.array, original_samples: mx.array, noise: mx.array, timesteps: mx.array
+):
+    sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
+    sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+    sqrt_alpha_prod = broadcast_to_shape_from_left(sqrt_alpha_prod, original_samples.shape)
+
+    sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
+    sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+    sqrt_one_minus_alpha_prod = broadcast_to_shape_from_left(sqrt_one_minus_alpha_prod, original_samples.shape)
+
+    return sqrt_alpha_prod, sqrt_one_minus_alpha_prod
 
 
 class MLXEulerDiscreteScheduler(MLXSchedulerMixin, ConfigMixin):
     """
-    Euler scheduler (Algorithm 2) from Karras et al. (2022) https://arxiv.org/abs/2206.00364. . Based on the original
+    MLX Implementation of Euler scheduler (Algorithm 2) from Karras et al. (2022) https://arxiv.org/abs/2206.00364. . Based on the original
     k-diffusion implementation by Katherine Crowson:
     https://github.com/crowsonkb/k-diffusion/blob/481677d114f6ea445aa009cf5bd7a9cdee909e47/k_diffusion/sampling.py#L51
 
@@ -89,12 +179,7 @@ class MLXEulerDiscreteScheduler(MLXSchedulerMixin, ConfigMixin):
     """
 
     _compatibles = [e.name for e in MLXKarrasDiffusionSchedulers]
-
-    dtype: mx.Dtype 
-
-    @property
-    def has_state(self):
-        return True
+    order=1
 
     @register_to_config
     def __init__(
@@ -103,46 +188,111 @@ class MLXEulerDiscreteScheduler(MLXSchedulerMixin, ConfigMixin):
         beta_start: float = 0.0001,
         beta_end: float = 0.02,
         beta_schedule: str = "linear",
-        trained_betas: Optional[mx.array] = None,
+        trained_betas: Optional[Union[np.ndarray, List[float]]] = None,
         prediction_type: str = "epsilon",
+        interpolation_type: str = "linear",
+        use_karras_sigmas: Optional[bool] = False,
+        use_exponential_sigmas: Optional[bool] = False,
+        use_beta_sigmas: Optional[bool] = False,
+        sigma_min: Optional[float] = None,
+        sigma_max: Optional[float] = None,
         timestep_spacing: str = "linspace",
-        dtype: mx.Dtype = mx.float32,
+        timestep_type: str = "discrete",  # can be "discrete" or "continuous"
+        steps_offset: int = 0,
+        rescale_betas_zero_snr: bool = False,
+        final_sigmas_type: str = "zero",  # can be "zero" or "sigma_min"num_train_timesteps: int = 1000,
+        dtype: mx.Dtype = mx.float32
     ):
         self.dtype = dtype
-
-    def create_state(
-        self, common: Optional[CommonSchedulerState] = None
-    ) -> EulerDiscreteSchedulerState:
-        if common is None:
-            common = CommonSchedulerState.create(self)
-
-        timesteps = mx.arange(0, self.config.num_train_timesteps).round()[::-1]
-        sigmas = ((1 - common.alphas_cumprod) / common.alphas_cumprod) ** 0.5
-        sigmas = mx.array(np.interp(timesteps, np.arange(0, len(sigmas)), sigmas), dtype=self.dtype)
-        sigmas = mx.concatenate([sigmas, mx.array([0.0], dtype=self.dtype)])
-
-        # standard deviation of the initial noise distribution
-        if self.config.timestep_spacing in ["linspace", "trailing"]:
-            init_noise_sigma = sigmas.max()
+        if self.config.use_beta_sigmas and not is_scipy_available():
+            raise ImportError("Make sure to install scipy if you want to use beta sigmas.")
+        if sum([self.config.use_beta_sigmas, self.config.use_exponential_sigmas, self.config.use_karras_sigmas]) > 1:
+            raise ValueError(
+                "Only one of `config.use_beta_sigmas`, `config.use_exponential_sigmas`, `config.use_karras_sigmas` can be used."
+            )
+        if trained_betas is not None:
+            self.betas = mx.array(trained_betas, dtype=mx.float32)
+        elif beta_schedule == "linear":
+            self.betas = mx.linspace(beta_start, beta_end, num_train_timesteps, dtype=mx.float32)
+        elif beta_schedule == "scaled_linear":
+            # this schedule is very specific to the latent diffusion model.
+            self.betas = mx.linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps, dtype=mx.float32) ** 2
+        elif beta_schedule == "squaredcos_cap_v2":
+            # Glide cosine schedule
+            self.betas = betas_for_alpha_bar(num_train_timesteps)
         else:
-            init_noise_sigma = (sigmas.max() ** 2 + 1) ** 0.5
+            raise NotImplementedError(f"{beta_schedule} is not implemented for {self.__class__}")
 
-        return EulerDiscreteSchedulerState.create(
-            common=common,
-            init_noise_sigma=init_noise_sigma,
-            timesteps=timesteps,
-            sigmas=sigmas,
-        )
+        if rescale_betas_zero_snr:
+            self.betas = rescale_zero_terminal_snr(self.betas)
+
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = mx.cumprod(self.alphas, axis=0)
+
+        timesteps = mx.arange(self.config.num_train_timesteps-1, 0, num_train_timesteps).round()[::-1]
+        if rescale_betas_zero_snr:
+            # Close to 0 without being 0 so first sigma is not inf
+            # FP16 smallest positive subnormal works well here
+            self.alphas_cumprod[-1] = 2**-24
+
+        sigmas = (((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5).flip(0)
+        timesteps = mx.linspace(0, num_train_timesteps, dtype=mx.float32)[::-1]
+
+        # setable values
+        self.num_inference_steps = None
+        self.timesteps = timesteps
+
+        self.sigmas = mx.concat([sigmas, mx.zeros(1)])
+
+        self.is_scale_input_called = False
+        self.use_karras_sigmas = use_karras_sigmas
+        self.use_exponential_sigmas = use_exponential_sigmas
+        self.use_beta_sigmas = use_beta_sigmas
+
+        self._step_index = None
+        self._begin_index = None
+
+    @property
+    def init_noise_sigma(self):
+        # standard deviation of the initial noise distribution
+        max_sigma = max(self.sigmas) if isinstance(self.sigmas, list) else self.sigmas.max()
+        if self.config.timestep_spacing in ["linspace", "trailing"]:
+            return max_sigma
+
+        return (max_sigma**2 + 1) ** 0.5
+
+    @property
+    def step_index(self):
+        """
+        The index counter for current timestep. It will increase 1 after each scheduler step.
+        """
+        return self._step_index
+
+    @property
+    def begin_index(self):
+        """
+        The index for the first timestep. It should be set from pipeline with `set_begin_index` method.
+        """
+        return self._begin_index
+
+    # Copied from diffusers.schedulers.scheduling_dpmsolver_multistep.DPMSolverMultistepScheduler.set_begin_index
+    def set_begin_index(self, begin_index: int = 0):
+        """
+        Sets the begin index for the scheduler. This function should be run from pipeline before the inference.
+
+        Args:
+            begin_index (`int`):
+                The begin index for the scheduler.
+        """
+        self._begin_index = begin_index
 
     def scale_model_input(
-        self, state: EulerDiscreteSchedulerState, sample: mx.array, timestep: int
+        self, sample: mx.array, timestep: int
     ) -> mx.array:
         """
         Scales the denoising model input by `(sigma**2 + 1) ** 0.5` to match the Euler algorithm.
 
         Args:
-            state (`EulerDiscreteSchedulerState`):
-                the `MLXEulerDiscreteScheduler` state data class instance.
             sample (`mx.array`):
                 current instance of sample being created by diffusion process.
             timestep (`int`):
@@ -151,145 +301,388 @@ class MLXEulerDiscreteScheduler(MLXSchedulerMixin, ConfigMixin):
         Returns:
             `mx.array`: scaled input sample
         """
-        (step_index,) = np.where(state.timesteps == timestep, size=1)
-        step_index = step_index[0]
+        if self.step_index is None:
+            self._init_step_index(timestep)
 
-        sigma = state.sigmas[step_index]
+        sigma = self.sigmas[self.step_index]
         sample = sample / ((sigma**2 + 1) ** 0.5)
+        self.is_scale_input_called = True
         return sample
 
     def set_timesteps(
-        self,
-        state: EulerDiscreteSchedulerState,
-        num_inference_steps: int,
-        shape: Tuple = (),
-    ) -> EulerDiscreteSchedulerState:
-        """
-        Sets the timesteps used for the diffusion chain. Supporting function to be run before inference.
+            self,
+            num_inference_steps: int = None,
+            timesteps: Optional[List[int]] = None,
+            sigmas: Optional[List[float]] = None,
+        ):
+            """
+            Sets the discrete timesteps used for the diffusion chain (to be run before inference).
 
-        Args:
-            state (`EulerDiscreteSchedulerState`):
-                the `MLXEulerDiscreteScheduler` state data class instance.
-            num_inference_steps (`int`):
-                the number of diffusion steps used when generating samples with a pre-trained model.
-        """
+            Args:
+                num_inference_steps (`int`):
+                    The number of diffusion steps used when generating samples with a pre-trained model.
+                timesteps (`List[int]`, *optional*):
+                    Custom timesteps used to support arbitrary timesteps schedule. If `None`, timesteps will be generated
+                    based on the `timestep_spacing` attribute. If `timesteps` is passed, `num_inference_steps` and `sigmas`
+                    must be `None`, and `timestep_spacing` attribute will be ignored.
+                sigmas (`List[float]`, *optional*):
+                    Custom sigmas used to support arbitrary timesteps schedule schedule. If `None`, timesteps and sigmas
+                    will be generated based on the relevant scheduler attributes. If `sigmas` is passed,
+                    `num_inference_steps` and `timesteps` must be `None`, and the timesteps will be generated based on the
+                    custom sigmas schedule.
+            """
 
-        if self.config.timestep_spacing == "linspace":
-            timesteps = np.linspace(
-                self.config.num_train_timesteps - 1,
-                0,
-                num_inference_steps,
-                dtype=self.dtype,
-            )
-        elif self.config.timestep_spacing == "leading":
-            step_ratio = self.config.num_train_timesteps // num_inference_steps
-            timesteps = (
-                (np.arange(0, num_inference_steps) * step_ratio)
-                .round()[::-1]
-                .copy()
-                .astype(float)
-            )
-            timesteps += 1
+            if timesteps is not None and sigmas is not None:
+                raise ValueError("Only one of `timesteps` or `sigmas` should be set.")
+            if num_inference_steps is None and timesteps is None and sigmas is None:
+                raise ValueError("Must pass exactly one of `num_inference_steps` or `timesteps` or `sigmas.")
+            if num_inference_steps is not None and (timesteps is not None or sigmas is not None):
+                raise ValueError("Can only pass one of `num_inference_steps` or `timesteps` or `sigmas`.")
+            if timesteps is not None and self.config.use_karras_sigmas:
+                raise ValueError("Cannot set `timesteps` with `config.use_karras_sigmas = True`.")
+            if timesteps is not None and self.config.use_exponential_sigmas:
+                raise ValueError("Cannot set `timesteps` with `config.use_exponential_sigmas = True`.")
+            if timesteps is not None and self.config.use_beta_sigmas:
+                raise ValueError("Cannot set `timesteps` with `config.use_beta_sigmas = True`.")
+            if (
+                timesteps is not None
+                and self.config.timestep_type == "continuous"
+                and self.config.prediction_type == "v_prediction"
+            ):
+                raise ValueError(
+                    "Cannot set `timesteps` with `config.timestep_type = 'continuous'` and `config.prediction_type = 'v_prediction'`."
+                )
+
+            if num_inference_steps is None:
+                num_inference_steps = len(timesteps) if timesteps is not None else len(sigmas) - 1
+            self.num_inference_steps = num_inference_steps
+
+            if sigmas is not None:
+                log_sigmas = mx.log(((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5)
+                sigmas = mx.array(sigmas, dtype=mx.float32)
+                timesteps = mx.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas[:-1]])
+
+            else:
+                if timesteps is not None:
+                    timesteps = mx.array(timesteps, dtype=mx.float32)
+                else:
+                    # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
+                    if self.config.timestep_spacing == "linspace":
+                        timesteps = mx.linspace(
+                            0, self.config.num_train_timesteps - 1, num_inference_steps, dtype=mx.float32
+                        )[::-1]
+                    elif self.config.timestep_spacing == "leading":
+                        step_ratio = self.config.num_train_timesteps // self.num_inference_steps
+                        # creates integer timesteps by multiplying by ratio
+                        # casting to int to avoid issues when num_inference_step is power of 3
+                        timesteps = (mx.arange(0, num_inference_steps) * step_ratio)[::-1]
+                        timesteps += self.config.steps_offset
+                    elif self.config.timestep_spacing == "trailing":
+                        step_ratio = self.config.num_train_timesteps / self.num_inference_steps
+                        # creates integer timesteps by multiplying by ratio
+                        # casting to int to avoid issues when num_inference_step is power of 3
+                        timesteps = mx.arange(self.config.num_train_timesteps, 0, -step_ratio)
+                        timesteps -= 1
+                    else:
+                        raise ValueError(
+                            f"{self.config.timestep_spacing} is not supported. Please make sure to choose one of 'linspace', 'leading' or 'trailing'."
+                        )
+
+                sigmas = ((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5
+                log_sigmas = mx.log(sigmas)
+                if self.config.interpolation_type == "linear":
+                    sigmas = mx.array(np.interp(np.array(timesteps), np.arange(0, len(sigmas)), np.array(sigmas)))
+                elif self.config.interpolation_type == "log_linear":
+                    sigmas = mx.exp(mx.linspace(mx.log(sigmas[-1]), mx.log(sigmas[0]), num_inference_steps + 1))
+                else:
+                    raise ValueError(
+                        f"{self.config.interpolation_type} is not implemented. Please specify interpolation_type to either"
+                        " 'linear' or 'log_linear'"
+                    )
+
+                if self.config.use_karras_sigmas:
+                    sigmas = self._convert_to_karras(in_sigmas=sigmas, num_inference_steps=self.num_inference_steps)
+                    timesteps = mx.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas])
+
+                elif self.config.use_exponential_sigmas:
+                    sigmas = self._convert_to_exponential(in_sigmas=sigmas, num_inference_steps=self.num_inference_steps)
+                    timesteps = mx.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas])
+
+                elif self.config.use_beta_sigmas:
+                    sigmas = self._convert_to_beta(in_sigmas=sigmas, num_inference_steps=self.num_inference_steps)
+                    timesteps = mx.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas])
+
+                if self.config.final_sigmas_type == "sigma_min":
+                    sigma_last = mx.array(((1 - self.alphas_cumprod[0]) / self.alphas_cumprod[0]) ** 0.5)
+                elif self.config.final_sigmas_type == "zero":
+                    sigma_last = 0
+                else:
+                    raise ValueError(
+                        f"`final_sigmas_type` must be one of 'zero', or 'sigma_min', but got {self.config.final_sigmas_type}"
+                    )
+
+                sigmas = mx.concatenate([sigmas, [sigma_last]]).astype(mx.float32)
+
+            sigmas = mx.array(sigmas)
+
+            # TODO: Support the full EDM scalings for all prediction types and timestep types
+            if self.config.timestep_type == "continuous" and self.config.prediction_type == "v_prediction":
+                self.timesteps = mx.array([0.25 * mx.log(sigma) for sigma in sigmas[:-1]])
+            else:
+                self.timesteps = mx.array(timesteps, dtype=mx.float32)
+
+            self._step_index = None
+            self._begin_index = None
+            self.sigmas = sigmas 
+
+    def _sigma_to_t(self, sigma, log_sigmas):
+        # get log sigma
+        log_sigma = mx.log(mx.maximum(sigma, 1e-10))
+
+        # get distribution
+        dists = log_sigma - log_sigmas[:, mx.newaxis]
+
+        # get sigmas range
+        low_idx = mx.clip(mx.argmax(mx.cumsum((dists >= 0), axis=0), axis=0), a_max=log_sigmas.shape[0] - 2)
+        high_idx = low_idx + 1
+
+        low = log_sigmas[low_idx]
+        high = log_sigmas[high_idx]
+
+        # interpolate sigmas
+        w = (low - log_sigma) / (low - high)
+        w = mx.clip(w, a_min=0, a_max=1)
+
+        # transform interpolation to time range
+        t = (1 - w) * low_idx + w * high_idx
+        t = mx.reshape(t, shape=sigma.shape)
+        return t
+
+    # Copied from https://github.com/crowsonkb/k-diffusion/blob/686dbad0f39640ea25c8a8c6a6e56bb40eacefa2/k_diffusion/sampling.py#L17
+    def _convert_to_karras(self, in_sigmas, num_inference_steps):
+        """Constructs the noise schedule of Karras et al. (2022)."""
+
+        # Hack to make sure that other schedulers which copy this function don't break
+        # TODO: Add this logic to the other schedulers
+        if hasattr(self.config, "sigma_min"):
+            sigma_min = self.config.sigma_min
         else:
-            raise ValueError(
-                f"timestep_spacing must be one of ['linspace', 'leading'], got {self.config.timestep_spacing}"
-            )
+            sigma_min = None
 
-        sigmas = (
-            (1 - state.common.alphas_cumprod) / state.common.alphas_cumprod
-        ) ** 0.5
-        sigmas = np.interp(timesteps, np.arange(0, len(sigmas)), sigmas)
-        sigmas = np.concatenate([sigmas, np.array([0.0], dtype=self.dtype)])
-
-        # standard deviation of the initial noise distribution
-        if self.config.timestep_spacing in ["linspace", "trailing"]:
-            init_noise_sigma = sigmas.max()
+        if hasattr(self.config, "sigma_max"):
+            sigma_max = self.config.sigma_max
         else:
-            init_noise_sigma = (sigmas.max() ** 2 + 1) ** 0.5
+            sigma_max = None
 
-        return state.replace(
-            timesteps=mx.array(timesteps),
-            sigmas=mx.array(sigmas),
-            num_inference_steps=num_inference_steps,
-            init_noise_sigma=init_noise_sigma,
+        sigma_min = sigma_min if sigma_min is not None else in_sigmas[-1].item()
+        sigma_max = sigma_max if sigma_max is not None else in_sigmas[0].item()
+
+        rho = 7.0  # 7.0 is the value used in the paper
+        ramp = mx.linspace(0, 1, num_inference_steps)
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
+        return sigmas
+
+    # Copied from https://github.com/crowsonkb/k-diffusion/blob/686dbad0f39640ea25c8a8c6a6e56bb40eacefa2/k_diffusion/sampling.py#L26
+    def _convert_to_exponential(self, in_sigmas, num_inference_steps: int):
+        """Constructs an exponential noise schedule."""
+
+        # Hack to make sure that other schedulers which copy this function don't break
+        # TODO: Add this logic to the other schedulers
+        if hasattr(self.config, "sigma_min"):
+            sigma_min = self.config.sigma_min
+        else:
+            sigma_min = None
+
+        if hasattr(self.config, "sigma_max"):
+            sigma_max = self.config.sigma_max
+        else:
+            sigma_max = None
+
+        sigma_min = sigma_min if sigma_min is not None else in_sigmas[-1].item()
+        sigma_max = sigma_max if sigma_max is not None else in_sigmas[0].item()
+
+        sigmas = mx.exp(mx.linspace(math.log(sigma_max), math.log(sigma_min), num_inference_steps))
+        return sigmas
+
+    def _convert_to_beta(
+        self, in_sigmas: mx.array, num_inference_steps: int, alpha: float = 0.6, beta: float = 0.6
+    ) -> mx.array:
+        """From "Beta Sampling is All You Need" [arXiv:2407.12173] (Lee et. al, 2024)"""
+
+        # Hack to make sure that other schedulers which copy this function don't break
+        # TODO: Add this logic to the other schedulers
+        if hasattr(self.config, "sigma_min"):
+            sigma_min = self.config.sigma_min
+        else:
+            sigma_min = None
+
+        if hasattr(self.config, "sigma_max"):
+            sigma_max = self.config.sigma_max
+        else:
+            sigma_max = None
+
+        sigma_min = sigma_min if sigma_min is not None else in_sigmas[-1].item()
+        sigma_max = sigma_max if sigma_max is not None else in_sigmas[0].item()
+
+        sigmas = mx.array(
+            [
+                sigma_min + (ppf * (sigma_max - sigma_min))
+                for ppf in [
+                    scipy.stats.beta.ppf(timestep, alpha, beta)
+                    for timestep in 1 - np.linspace(0, 1, num_inference_steps)
+                ]
+            ]
         )
+        return sigmas
+
+    def index_for_timestep(self, timestep, schedule_timesteps=None):
+        if schedule_timesteps is None:
+            schedule_timesteps = self.timesteps
+
+        indices = (np.array(schedule_timesteps) == timestep).nonzero()
+
+        # The sigma index that is taken for the **very** first `step`
+        # is always the second index (or the last index if there is only 1)
+        # This way we can ensure we don't accidentally skip a sigma in
+        # case we start in the middle of the denoising schedule (e.g. for image-to-image)
+        pos = 1 if len(indices) > 1 else 0
+
+        return indices[pos].item()
+
+    def _init_step_index(self, timestep):
+        if self.begin_index is None:
+            self._step_index = self.index_for_timestep(timestep)
+        else:
+            self._step_index = self._begin_index
 
     def step(
         self,
-        state: EulerDiscreteSchedulerState,
         model_output: mx.array,
-        timestep: int,
+        timestep: Union[float, mx.array],
         sample: mx.array,
+        s_churn: float = 0.0,
+        s_tmin: float = 0.0,
+        s_tmax: float = float("inf"),
+        s_noise: float = 1.0,
+        seed: Optional[Union[int, mx.random.seed]] = None,
         return_dict: bool = True,
     ) -> Union[MLXEulerDiscreteSchedulerOutput, Tuple]:
         """
-        Predict the sample at the previous timestep by reversing the SDE. Core function to propagate the diffusion
+        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
         process from the learned model outputs (most often the predicted noise).
 
         Args:
-            state (`EulerDiscreteSchedulerState`):
-                the `MLXEulerDiscreteScheduler` state data class instance.
-            model_output (`mx.array`): direct output from learned diffusion model.
-            timestep (`int`): current discrete timestep in the diffusion chain.
+            model_output (`mx.array`):
+                The direct output from learned diffusion model.
+            timestep (`float`):
+                The current discrete timestep in the diffusion chain.
             sample (`mx.array`):
-                current instance of sample being created by diffusion process.
-            order: coefficient for multi-step inference.
-            return_dict (`bool`): option for returning tuple rather than MLXEulerDiscreteScheduler class
+                A current instance of a sample created by the diffusion process.
+            s_churn (`float`):
+            s_tmin  (`float`):
+            s_tmax  (`float`):
+            s_noise (`float`, defaults to 1.0):
+                Scaling factor for noise added to the sample.
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            return_dict (`bool`):
+                Whether or not to return a [`~schedulers.scheduling_euler_discrete_mlx.MLXEulerDiscreteSchedulerOutput`] or
+                tuple.
 
         Returns:
-            [`MLXEulerDiscreteScheduler`] or `tuple`: [`MLXEulerDiscreteScheduler`] if `return_dict` is True,
-            otherwise a `tuple`. When returning a tuple, the first element is the sample tensor.
-
+            [`~schedulers.scheduling_euler_discrete_mlx.MLXEulerDiscreteSchedulerOutput`] or `tuple`:
+                If return_dict is `True`, [`~schedulers.scheduling_euler_discrete_mlx.MLXEulerDiscreteSchedulerOutput`] is
+                returned, otherwise a tuple is returned where the first element is the sample tensor.
         """
-        if state.num_inference_steps is None:
-            raise ValueError(
-                "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
+
+        if not self.is_scale_input_called:
+            logger.warning(
+                "The `scale_model_input` function should be called before `step` to ensure correct denoising. "
+                "See `StableDiffusionPipeline` for a usage example."
             )
 
-        (step_index,) = np.where(state.timesteps == timestep, size=1)
-        step_index = step_index[0]
+        if self.step_index is None:
+            self._init_step_index(timestep)
 
-        sigma = state.sigmas[step_index]
+        # Upcast to avoid precision issues when computing prev_sample
+        sample = sample.astype(mx.float32)
+
+        sigma = self.sigmas[self.step_index]
+
+        gamma = min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.0
+
+        noise = mx.random.uniform(
+            shape=model_output.shape, dtype=model_output.dtype, key=seed
+        )
+
+        eps = noise * s_noise
+        sigma_hat = sigma * (gamma + 1)
+
+        if gamma > 0:
+            sample = sample + eps * (sigma_hat**2 - sigma**2) ** 0.5
 
         # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
-        if self.config.prediction_type == "epsilon":
-            pred_original_sample = sample - sigma * model_output
+        # NOTE: "original_sample" should not be an expected prediction_type but is left in for
+        # backwards compatibility
+        if self.config.prediction_type == "original_sample" or self.config.prediction_type == "sample":
+            pred_original_sample = model_output
+        elif self.config.prediction_type == "epsilon":
+            pred_original_sample = sample - sigma_hat * model_output
         elif self.config.prediction_type == "v_prediction":
-            # * c_out + input * c_skip
-            pred_original_sample = model_output * (-sigma / (sigma**2 + 1) ** 0.5) + (
-                sample / (sigma**2 + 1)
-            )
+            # denoised = model_output * c_out + input * c_skip
+            pred_original_sample = model_output * (-sigma / (sigma**2 + 1) ** 0.5) + (sample / (sigma**2 + 1))
         else:
             raise ValueError(
                 f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, or `v_prediction`"
             )
 
         # 2. Convert to an ODE derivative
-        derivative = (sample - pred_original_sample) / sigma
+        derivative = (sample - pred_original_sample) / sigma_hat
 
-        # dt = sigma_down - sigma
-        dt = state.sigmas[step_index + 1] - sigma
+        dt = self.sigmas[self.step_index + 1] - sigma_hat
 
         prev_sample = sample + derivative * dt
 
-        if not return_dict:
-            return (prev_sample, state)
+        # upon completion increase step index by one
+        self._step_index += 1
 
-        return MLXEulerDiscreteSchedulerOutput(prev_sample=prev_sample, state=state)
+        if not return_dict:
+            return (prev_sample,)
+
+        return MLXEulerDiscreteSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
     def add_noise(
         self,
-        state: EulerDiscreteSchedulerState,
         original_samples: mx.array,
         noise: mx.array,
         timesteps: mx.array,
     ) -> mx.array:
-        sigma = state.sigmas[timesteps].flatten()
+        # Make sure sigmas and timesteps have the same device and dtype as original_samples
+        schedular_timesteps = self.timesteps
+        sigmas = self.sigmas
+
+        # self.begin_index is None when scheduler is used for training, or pipeline does not implement set_begin_index
+        if self.begin_index is None:
+            step_indices = [self.index_for_timestep(t, schedular_timesteps) for t in timesteps]
+        elif self.step_index is not None:
+            # add_noise is called after first denoising step (for inpainting)
+            step_indices = [self.step_index] * timesteps.shape[0]
+        else:
+            # add noise is called before first denoising step to create initial latent(img2img)
+            step_indices = [self.begin_index] * timesteps.shape[0]
+
+        sigma = sigmas[step_indices]
         sigma = broadcast_to_shape_from_left(sigma, noise.shape)
 
         noisy_samples = original_samples + noise * sigma
-
         return noisy_samples
+
+    def get_velocity(self, sample: mx.array, noise: mx.array, timesteps: mx.array) -> mx.array:
+        sqrt_alpha_prod, sqrt_one_minus_alpha_prod = get_sqrt_alpha_prod(self.alphas_cumprod, sample, noise, timesteps)
+        velocity = sqrt_alpha_prod * noise - sqrt_one_minus_alpha_prod * sample
+        return velocity
 
     def __len__(self):
         return self.config.num_train_timesteps
