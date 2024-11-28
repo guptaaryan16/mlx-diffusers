@@ -544,6 +544,24 @@ else:
     _import_structure["models.unets.unet_2d_condition_mlx"] = ["MLXUNet2DConditionModel"]
     _import_structure["models.vae_mlx"] = ["MLXAutoencoderKL"]
 
+try:
+    if not (is_mlx_available() and is_transformers_available()):
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from .utils import dummy_mlx_and_transformers_objects  # noqa F403
+
+    _import_structure["utils.dummy_mlx_and_transformers_objects"] = [
+        name for name in dir(dummy_mlx_and_transformers_objects) if not name.startswith("_")
+    ]
+
+
+else:
+    _import_structure["pipelines"].extend(
+        [
+            "MLXStableDiffusionPipeline",
+        ]
+    )
+
 
 try:
     if not (is_note_seq_available()):

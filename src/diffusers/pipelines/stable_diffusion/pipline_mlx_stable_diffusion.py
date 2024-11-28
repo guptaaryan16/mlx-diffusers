@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Union
 
 import mlx.core as mx
 import numpy as np
+import torch
 from packaging import version
 from transformers import CLIPImageProcessor, CLIPTokenizer, CLIPTextModel
 from ...models import MLXAutoencoderKL, MLXUNet2DConditionModel
@@ -25,44 +26,11 @@ from ...schedulers import MLXEulerDiscreteScheduler, MLXDDPMScheduler
 from ...utils import deprecate, logging, replace_example_docstring
 from ..pipeline_mlx_utils import MLXDiffusionPipeline
 from .pipeline_output import MLXStableDiffusionPipelineOutput
-from .safety_checker_mlx import MLXStableDiffusionSafetyChecker
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
-EXAMPLE_DOC_STRING = """
-    Examples:
-        ```py
-        >>> import 
-        >>> import numpy as np
-        >>> from flax.jax_utils import replicate
-        >>> from flax.training.common_utils import shard
-
-        >>> from diffusers import MLXStableDiffusionPipeline
-
-        >>> pipeline, params = MLXStableDiffusionPipeline.from_pretrained(
-        ...     "runwayml/stable-diffusion-v1-5", variant="bf16", dtype=jax.numpy.bfloat16
-        ... )
-
-        >>> prompt = "a photo of an astronaut riding a horse on mars"
-
-        >>> prng_seed = jax.random.PRNGKey(0)
-        >>> num_inference_steps = 50
-
-        >>> num_samples = jax.device_count()
-        >>> prompt = num_samples * [prompt]
-        >>> prompt_ids = pipeline.prepare_inputs(prompt)
-        # shard inputs and rng
-
-        >>> params = replicate(params)
-        >>> prng_seed = jax.random.split(prng_seed, jax.device_count())
-        >>> prompt_ids = shard(prompt_ids)
-
-        >>> images = pipeline(prompt_ids, params, prng_seed, num_inference_steps, jit=True).images
-        >>> images = pipeline.numpy_to_pil(np.asarray(images.reshape((num_samples,) + images.shape[-3:])))
-        ```
-"""
-
-class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
+#TODO: Implement the model loading for MLXDiffusionPipeline through `pipeline_mlx_utils`
+class MLXStableDiffusionPipeline:
     r"""
     MLX-based pipeline for text-to-image generation using Stable Diffusion.
 
@@ -97,61 +65,19 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
         tokenizer: CLIPTokenizer,
         unet: MLXUNet2DConditionModel,
         scheduler: Union[MLXEulerDiscreteScheduler, MLXDDPMScheduler],
-        safety_checker: MLXStableDiffusionSafetyChecker,
+        # safety_checker: MLXStableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
         dtype: mx.Dtype = mx.float32,
     ):
         super().__init__()
         self.dtype = dtype
-
-        if safety_checker is None:
-            logger.warning(
-                f"You have disabled the safety checker for {self.__class__} by passing `safety_checker=None`. Ensure"
-                " that you abide to the conditions of the Stable Diffusion license and do not expose unfiltered"
-                " results in services or applications open to the public. Both the diffusers team and Hugging Face"
-                " strongly recommend to keep the safety filter enabled in all public facing circumstances, disabling"
-                " it only for use-cases that involve analyzing network behavior or auditing its results. For more"
-                " information, please have a look at https://github.com/huggingface/diffusers/pull/254 ."
-            )
-
-        is_unet_version_less_0_9_0 = hasattr(
-            unet.config, "_diffusers_version"
-        ) and version.parse(
-            version.parse(unet.config._diffusers_version).base_version
-        ) < version.parse(
-            "0.9.0.dev0"
-        )
-        is_unet_sample_size_less_64 = (
-            hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
-        )
-        if is_unet_version_less_0_9_0 and is_unet_sample_size_less_64:
-            deprecation_message = (
-                "The configuration file of the unet has set the default `sample_size` to smaller than"
-                " 64 which seems highly unlikely .If you're checkpoint is a fine-tuned version of any of the"
-                " following: \n- CompVis/stable-diffusion-v1-4 \n- CompVis/stable-diffusion-v1-3 \n-"
-                " CompVis/stable-diffusion-v1-2 \n- CompVis/stable-diffusion-v1-1 \n- runwayml/stable-diffusion-v1-5"
-                " \n- runwayml/stable-diffusion-inpainting \n you should change 'sample_size' to 64 in the"
-                " configuration file. Please make sure to update the config accordingly as leaving `sample_size=32`"
-                " in the config might lead to incorrect results in future versions. If you have downloaded this"
-                " checkpoint from the Hugging Face Hub, it would be very nice if you could open a Pull request for"
-                " the `unet/config.json` file"
-            )
-            deprecate(
-                "sample_size<64", "1.0.0", deprecation_message, standard_warn=False
-            )
-            new_config = dict(unet.config)
-            new_config["sample_size"] = 64
-            unet._internal_dict = new_config
-
-        self.register_modules(
-            vae=vae,
-            text_encoder=text_encoder,
-            tokenizer=tokenizer,
-            unet=unet,
-            scheduler=scheduler,
-            safety_checker=safety_checker,
-            feature_extractor=feature_extractor,
-        )
+        self.vae=vae
+        self.text_encoder=text_encoder
+        self.tokenizer=tokenizer
+        self.unet=unet
+        self.scheduler=scheduler
+        self.feature_extractor=feature_extractor
+        self.safety_checker = None
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
 
     def prepare_inputs(self, prompt: Union[str, List[str]]):
@@ -167,7 +93,7 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
             truncation=True,
             return_tensors="np",
         )
-        return mx.array(text_input.input_ids)
+        return text_input.input_ids
 
     def _get_has_nsfw_concepts(self, features, params):
         has_nsfw_concepts = self.safety_checker(features, params)
@@ -201,8 +127,7 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
 
     def _generate(
         self,
-        prompt_ids: mx.array,
-        params: Dict,
+        prompt_ids: np.array,
         prng_seed: mx.array,
         num_inference_steps: int,
         height: int,
@@ -217,7 +142,7 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
             )
 
         # get prompt text embeddings
-        prompt_embeds = self.text_encoder(prompt_ids, params=params["text_encoder"])[0]
+        prompt_embeds = mx.array(self.text_encoder(torch.tensor(prompt_ids))[0].detach().numpy())
 
         # TODO: currently it is assumed `do_classifier_free_guidance = guidance_scale > 1.0`
         # implement this conditional `do_classifier_free_guidance = guidance_scale > 1.0`
@@ -230,13 +155,13 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
                 [""] * batch_size,
                 padding="max_length",
                 max_length=max_length,
-                return_tensors="np",
+                return_tensors="pt",
             ).input_ids
         else:
             uncond_input = neg_prompt_ids
-        negative_prompt_embeds = self.text_encoder(
-            uncond_input, params=params["text_encoder"]
-        )[0]
+        negative_prompt_embeds = mx.array(self.text_encoder(
+            uncond_input
+        )[0].detach().numpy())
         context = mx.concatenate([negative_prompt_embeds, prompt_embeds])
 
         # Ensure model output will be `float32` before going into the scheduler
@@ -259,13 +184,13 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
                 )
 
         def loop_body(step, args):
-            latents, scheduler_state = args
+            latents, timesteps = args
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
             latents_input = mx.concatenate([latents] * 2)
 
-            t = mx.array(scheduler_state.timesteps, dtype=mx.int32)[step]
+            t = mx.array(timesteps, dtype=mx.int32)[step]
             timestep = mx.broadcast_to(t, latents_input.shape[0])
 
             latents_input = self.scheduler.scale_model_input(
@@ -273,8 +198,7 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
             )
 
             # predict the noise residual
-            noise_pred = self.unet.apply(
-                {"params": params["unet"]},
+            noise_pred = self.unet(
                 mx.array(latents_input),
                 mx.array(timestep, dtype=mx.int32),
                 encoder_hidden_states=context,
@@ -286,37 +210,34 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
             )
 
             # compute the previous noisy sample x_t -> x_t-1
-            latents, scheduler_state = self.scheduler.step(
-                scheduler_state, noise_pred, t, latents
+            latents = self.scheduler.step(
+                noise_pred, t, latents
             ).to_tuple()
-            return latents, scheduler_state
-
-        scheduler_state = self.scheduler.set_timesteps(
-            params["scheduler"],
+            return latents
+                
+        self.scheduler.set_timesteps(
             num_inference_steps=num_inference_steps,
             shape=latents.shape,
         )
 
         # scale the initial noise by the standard deviation required by the scheduler
-        latents = latents * params["scheduler"].init_noise_sigma
+        latents = latents * self.scheduler.init_noise_sigma
 
         for i in range(num_inference_steps):
-            latents, scheduler_state = loop_body(i, (latents, scheduler_state))
+            latents, self.scheduler.timesteps = loop_body(i, (latents, self.scheduler.timesteps))
 
         # scale and decode the image latents with vae
         latents = 1 / self.vae.config.scaling_factor * latents
-        image = self.vae.apply(
-            {"params": params["vae"]}, latents, method=self.vae.decode
+        image = self.vae(
+            latents, method=self.vae.decode
         ).sample
 
         image = mx.transpose(mx.clip((image / 2 + 0.5), 0, 1), (0, 2, 3, 1))
         return np.array(image)
 
-    @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        prompt_ids: mx.array,
-        params: Dict,
+        prompt_ids: np.array,
         prng_seed: mx.array,
         num_inference_steps: int = 50,
         height: Optional[int] = None,
@@ -377,14 +298,13 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
         if isinstance(guidance_scale, float):
             # Convert to a tensor so each device gets a copy. Follow the prompt_ids for
             # shape information, as they may be sharded (when `jit` is `True`), or not.
-            guidance_scale = jnp.array([guidance_scale] * prompt_ids.shape[0])
+            guidance_scale = mx.array([guidance_scale] * prompt_ids.shape[0])
             if len(prompt_ids.shape) > 2:
                 # Assume sharded
                 guidance_scale = guidance_scale[:, None]
 
         images = self._generate(
                 prompt_ids,
-                params,
                 prng_seed,
                 num_inference_steps,
                 height,
@@ -395,23 +315,23 @@ class MLXStableDiffusionPipeline(MLXDiffusionPipeline):
         )
 
         if self.safety_checker is not None:
-            safety_params = params["safety_checker"]
-            images_uint8_casted = (images * 255).round().astype("uint8")
-            num_devices, batch_size = images.shape[:2]
+            # safety_params = params["safety_checker"]
+            # images_uint8_casted = (images * 255).round().astype("uint8")
+            # num_devices, batch_size = images.shape[:2]
 
-            images_uint8_casted = np.asarray(images_uint8_casted).reshape(
-                num_devices * batch_size, height, width, 3
-            )
-            images_uint8_casted, has_nsfw_concept = self._run_safety_checker(
-                images_uint8_casted, safety_params, jit
-            )
-            images = np.asarray(images).copy()
+            # images_uint8_casted = np.asarray(images_uint8_casted).reshape(
+            #     num_devices * batch_size, height, width, 3
+            # )
+            # images_uint8_casted, has_nsfw_concept = self._run_safety_checker(
+            #     images_uint8_casted, safety_params, jit
+            # )
+            # images = np.asarray(images).copy()
 
-            # block images
-            if any(has_nsfw_concept):
-                for i, is_nsfw in enumerate(has_nsfw_concept):
-                    if is_nsfw:
-                        images[i, 0] = np.asarray(images_uint8_casted[i])
+            # # block images
+            # if any(has_nsfw_concept):
+            #     for i, is_nsfw in enumerate(has_nsfw_concept):
+            #         if is_nsfw:
+            #             images[i, 0] = np.asarray(images_uint8_casted[i])
 
             images = images.reshape(num_devices, batch_size, height, width, 3)
         else:

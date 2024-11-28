@@ -44,7 +44,7 @@ from ..utils import (
 # if is_transformers_available():
 #     from transformers import MLXPreTrainedModel
 
-INDEX_FILE = "diffusion_mlx_model.bin"
+INDEX_FILE = "diffusion_mlx_model.safetensors"
 
 
 logger = logging.get_logger(__name__)
