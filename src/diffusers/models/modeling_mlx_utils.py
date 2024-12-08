@@ -321,7 +321,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
         model.update(tree_unflatten(mlx_weights))
         
         # Eval the weights due to lazy loading in SAFETENSORS
-        mx.eval(model.parameters())
+        #mx.eval(model.parameters())
         model.eval()
 
         return model

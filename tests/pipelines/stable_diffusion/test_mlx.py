@@ -5,8 +5,8 @@ import torch
 from PIL import Image
 import numpy as np
 
-model_id = "stabilityai/stable-diffusion-2"
-dtype = mx.float16
+model_id = "CompVis/stable-diffusion-v1-4"
+dtype = mx.bfloat16
 
 ## MLX based Components
 scheduler = MLXDDIMScheduler.from_pretrained(model_id, subfolder="scheduler")
@@ -15,17 +15,16 @@ unet = MLXUNet2DConditionModel.from_pretrained(model_id, subfolder="unet", dtype
 
 torch_dtype = torch.float16
 ## PyTorch based parts(to be converted to MLX)
-text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder", torch_dtype=torch.float16,)
-tokenizer = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer",  torch_dtype=torch.float16,)
-feature_extractor = CLIPImageProcessor.from_pretrained(model_id, subfolder="feature_extractor",  torch_dtype=torch.float16)
+text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder", torch_dtype=torch_dtype)
+tokenizer = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer",  torch_dtype=torch_dtype)
+feature_extractor = CLIPImageProcessor.from_pretrained(model_id, subfolder="feature_extractor",  torch_dtype=torch_dtype)
 
-pipline = MLXStableDiffusionPipeline(vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet, scheduler=scheduler, feature_extractor=feature_extractor)
+pipeline = MLXStableDiffusionPipeline(vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet, scheduler=scheduler, feature_extractor=feature_extractor)
 
 prompt = "a photo of an astronaut riding a horse on mars"
 seed = 0
-prompt_ids = pipline.prepare_inputs(prompt)
+prompt_ids = pipeline.prepare_inputs(prompt)
 
-images = pipline(prompt_ids, seed).images
-images = Image.fromarray(images).convert('RGB')
-
+images = pipeline(prompt_ids, seed).images
+images = pipeline.numpy_to_pil(images)
 images.save("astronaut_rides_horse.png")

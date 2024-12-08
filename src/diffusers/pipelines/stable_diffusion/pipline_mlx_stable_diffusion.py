@@ -21,11 +21,14 @@ import torch
 from packaging import version
 from transformers import CLIPImageProcessor, CLIPTokenizer, CLIPTextModel
 from ...models import MLXAutoencoderKL, MLXUNet2DConditionModel
+from ...callbacks import MultiPipelineCallbacks, PipelineCallback
 
 from ...schedulers import MLXEulerDiscreteScheduler, MLXDDPMScheduler
 from ...utils import deprecate, logging, replace_example_docstring
 from ..pipeline_mlx_utils import MLXDiffusionPipeline
 from .pipeline_output import MLXStableDiffusionPipelineOutput
+from PIL import Image
+from tqdm.auto import tqdm
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -135,6 +138,9 @@ class MLXStableDiffusionPipeline:
         guidance_scale: float,
         latents: Optional[mx.array] = None,
         neg_prompt_ids: Optional[mx.array] = None,
+        callback=None,
+        callback_steps=None, 
+        callback_on_step_end = None
     ):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(
@@ -142,7 +148,7 @@ class MLXStableDiffusionPipeline:
             )
 
         # get prompt text embeddings
-        prompt_embeds = mx.array(self.text_encoder(torch.tensor(prompt_ids))[0].detach().numpy())
+        prompt_embeds = mx.array(self.text_encoder(torch.tensor(prompt_ids))[0].detach().numpy()).astype(self.dtype)
 
         # TODO: currently it is assumed `do_classifier_free_guidance = guidance_scale > 1.0`
         # implement this conditional `do_classifier_free_guidance = guidance_scale > 1.0`
@@ -161,7 +167,7 @@ class MLXStableDiffusionPipeline:
             uncond_input = neg_prompt_ids
         negative_prompt_embeds = mx.array(self.text_encoder(
             uncond_input
-        )[0].detach().numpy())
+        )[0].detach().numpy()).astype(self.dtype)
         context = mx.concatenate([negative_prompt_embeds, prompt_embeds])
 
         # Ensure model output will be `float32` before going into the scheduler
@@ -213,7 +219,7 @@ class MLXStableDiffusionPipeline:
             latents = self.scheduler.step(
                 noise_pred, t, latents
             ).prev_sample
-
+           
             return latents
                 
         self.scheduler.set_timesteps(
@@ -222,18 +228,45 @@ class MLXStableDiffusionPipeline:
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
+        num_warmup_steps = len(self.scheduler.timesteps) - num_inference_steps * self.scheduler.order
 
-        for i in range(num_inference_steps):
-            latents = loop_body(i, latents)
+        num_inference_steps = 10
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            
+            for i in range(num_inference_steps):
+                latents = loop_body(i, latents)
+                mx.eval(latents)
+
+                if callback_on_step_end is not None:
+                    callback_kwargs = {}
+                    for k in callback_on_step_end_tensor_inputs:
+                        callback_kwargs[k] = locals()[k]
+                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                    latents = callback_outputs.pop("latents", latents)
+                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+
+                # call the callback, if provided
+                if i == len(self.scheduler.timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+
 
         # scale and decode the image latents with vae
         latents = 1 / self.vae.config.scaling_factor * latents
+        # Lets clear the memory for unet and scheduler
+        #del self.unet
+        mx.save("/Users/guptaaryan16/Desktop/OSS/diffusers/latents.npy", latents)
+        raise Exception("Error")
         image = self.vae.decode(
             latents
         ).sample
 
         image = mx.transpose(mx.clip((image / 2 + 0.5), 0, 1), (0, 2, 3, 1))
-        return np.array(image)
+        return np.array(image.astype(mx.uint8))
 
     def __call__(
         self,
@@ -247,6 +280,8 @@ class MLXStableDiffusionPipeline:
         neg_prompt_ids: mx.array = None,
         return_dict: bool = True,
         jit: bool = False,
+        callback_on_step_end=None,
+        **kwargs,
     ):
         r"""
         The call function to the pipeline for generation.
@@ -291,6 +326,25 @@ class MLXStableDiffusionPipeline:
                 and the second element is a list of `bool`s indicating whether the corresponding generated image
                 contains "not-safe-for-work" (nsfw) content.
         """
+
+        callback = kwargs.pop("callback", None)
+        callback_steps = kwargs.pop("callback_steps", None)
+
+        if callback is not None:
+            deprecate(
+                "callback",
+                "1.0.0",
+                "Passing `callback` as an input argument to `__call__` is deprecated, consider using `callback_on_step_end`",
+            )
+        if callback_steps is not None:
+            deprecate(
+                "callback_steps",
+                "1.0.0",
+                "Passing `callback_steps` as an input argument to `__call__` is deprecated, consider using `callback_on_step_end`",
+            )
+
+        if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
+            callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
         width = width or self.unet.config.sample_size * self.vae_scale_factor
@@ -312,6 +366,8 @@ class MLXStableDiffusionPipeline:
                 guidance_scale,
                 latents,
                 neg_prompt_ids,
+                callback=callback,
+                callback_steps=callback_steps 
         )
 
         # if self.safety_checker is not None:
@@ -344,3 +400,37 @@ class MLXStableDiffusionPipeline:
         return MLXStableDiffusionPipelineOutput(
             images=images, nsfw_content_detected=has_nsfw_concept
         )
+   
+    @staticmethod
+    def numpy_to_pil(images):
+        """
+        Convert a NumPy image or a batch of images to a PIL image.
+        """
+        if images.ndim == 3:
+            images = images[None, ...]
+        images = (images * 255).round().astype("uint8")
+        if images.shape[-1] == 1:
+            # special case for grayscale (single channel) images
+            pil_images = [Image.fromarray(image.squeeze(), mode="L") for image in images]
+        else:
+            pil_images = [Image.fromarray(image) for image in images]
+
+        return pil_images
+
+    def progress_bar(self, iterable=None, total=None):
+        if not hasattr(self, "_progress_bar_config"):
+            self._progress_bar_config = {}
+        elif not isinstance(self._progress_bar_config, dict):
+            raise ValueError(
+                f"`self._progress_bar_config` should be of type `dict`, but is {type(self._progress_bar_config)}."
+            )
+
+        if iterable is not None:
+            return tqdm(iterable, **self._progress_bar_config)
+        elif total is not None:
+            return tqdm(total=total, **self._progress_bar_config)
+        else:
+            raise ValueError("Either `total` or `iterable` has to be defined.")
+
+    def set_progress_bar_config(self, **kwargs):
+        self._progress_bar_config = kwargs

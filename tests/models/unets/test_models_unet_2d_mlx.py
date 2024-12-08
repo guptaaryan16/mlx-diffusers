@@ -13,7 +13,7 @@ if is_mlx_available():
     import mlx.core as mx
 
 
-@slow
+# @slow
 @require_mlx
 class MLXUNet2DConditionModelIntegrationTests(unittest.TestCase):
     def get_file_format(self, seed, shape):
