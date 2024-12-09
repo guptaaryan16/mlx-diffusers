@@ -316,12 +316,12 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                 f" {pretrained_model_name_or_path}.\nIf your task is similar to the task the model of the checkpoint"
                 f" was trained on, you can already use {model.__class__.__name__} for predictions without further"
                 " training."
-            )
-        mlx_weights = [(k, v.astype(dtype)) for k,v in state.items()] 
-        model.update(tree_unflatten(mlx_weights))
+            ),
+        state = [(k, v.astype(dtype)) for k,v in state.items()] 
+        model.update(tree_unflatten(state))
         
         # Eval the weights due to lazy loading in SAFETENSORS
-        #mx.eval(model.parameters())
+        mx.eval(model.parameters())
         model.eval()
 
         return model
