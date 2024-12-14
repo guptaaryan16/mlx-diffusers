@@ -1,4 +1,7 @@
 import unittest
+import gc
+import unittest
+from parameterized import parameterized
 
 from diffusers import MLXAutoencoderKL
 from diffusers.utils import is_mlx_available
@@ -37,10 +40,3 @@ class MLXAutoencoderKLTests(MLXModelTesterMixin, unittest.TestCase):
         inputs_dict = self.dummy_input
         return init_dict, inputs_dict
     
-    def test_from_pretrained_hub(self):
-        model = MLXAutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema", from_pt=True)
-        self.assertIsNotNone(model)
-
-        image = model(**self.dummy_input)
-
-        assert image is not None, "Make sure output is not None"

@@ -38,7 +38,6 @@ from ..utils import (
     PushToHubMixin,
     logging,
 )
-from .modeling_mlx_pytorch_utils import convert_pytorch_state_dict_to_mlx
 
 
 logger = logging.get_logger(__name__)
@@ -107,7 +106,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                 The specific model version to use. It can be a branch name, a tag name, a commit id, or any identifier
                 allowed by Git.
             from_pt (`bool`, *optional*, defaults to `False`):
-                Load the model weights from a PyTorch checkpoint save file.
+                Load the model weights from a PyTorch checkpoint(in safetensors only for n) save file.
             kwargs (remaining dictionary of keyword arguments, *optional*):
                 Can be used to update the configuration object (after it is loaded) and initiate the model (for
                 example, `output_attentions=True`). Behaves differently depending on whether a `config` is provided or
@@ -127,8 +126,8 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
         ```python
         >>> from diffusers import MLXUNet2DConditionModel
 
-        >>> # Download model and configuration from huggingface.co and cache.
-        >>> model = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5")
+        >>> # Download model and configuration from huggingface.co and cache. `from_pt=True` for weight format from pytorch
+        >>> model = MLXUNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5", from_pt=True)
         >>> # Model was saved using *save_pretrained('./test/saved_model/')* (for example purposes, not runnable).
         >>> model = MLXUNet2DConditionModel.from_pretrained("./test/saved_model/")
         ```
@@ -257,10 +256,11 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
        
         # Used https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/base.py
         # Didn't use mlx.nn.Module.load_weights method directly for enhanced debugging within the diffusers library
+        # More info here: https://github.com/ml-explore/mlx/discussions/724
         if from_pt:
             # Step 1: Get the pytorch file
             state = dict(mx.load(model_file))
-            state = convert_pytorch_state_dict_to_mlx(state)
+            state =  {k: mx.transpose(v, (0, 2, 3, 1)) if v.ndim == 4 else v for k, v in state.items()}
         else:
             state = dict(mx.load(model_file))
         
