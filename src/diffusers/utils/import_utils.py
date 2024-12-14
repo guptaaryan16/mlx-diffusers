@@ -46,6 +46,7 @@ ENV_VARS_TRUE_AND_AUTO_VALUES = ENV_VARS_TRUE_VALUES.union({"AUTO"})
 USE_TF = os.environ.get("USE_TF", "AUTO").upper()
 USE_TORCH = os.environ.get("USE_TORCH", "AUTO").upper()
 USE_JAX = os.environ.get("USE_FLAX", "AUTO").upper()
+USE_MLX = os.environ.get("USE_MLX", "AUTO").upper()
 USE_SAFETENSORS = os.environ.get("USE_SAFETENSORS", "AUTO").upper()
 DIFFUSERS_SLOW_IMPORT = os.environ.get("DIFFUSERS_SLOW_IMPORT", "FALSE").upper()
 DIFFUSERS_SLOW_IMPORT = DIFFUSERS_SLOW_IMPORT in ENV_VARS_TRUE_VALUES
@@ -95,6 +96,20 @@ if USE_JAX in ENV_VARS_TRUE_AND_AUTO_VALUES:
             _flax_available = False
 else:
     _flax_available = False
+
+_mlx_version = "N/A"
+if USE_MLX in ENV_VARS_TRUE_AND_AUTO_VALUES:
+    _mlx_available = importlib.util.find_spec("mlx") is not None
+    if _mlx_available:
+        try:
+            _jax_version = importlib_metadata.version("mlx")
+            logger.info(
+                f"MLX version {_mlx_version} available."
+            )
+        except importlib_metadata.PackageNotFoundError:
+            _mlx_available = False
+else:
+    _mlx_available = False
 
 if USE_SAFETENSORS in ENV_VARS_TRUE_AND_AUTO_VALUES:
     _safetensors_available = importlib.util.find_spec("safetensors") is not None
@@ -355,6 +370,8 @@ def is_torch_npu_available():
 def is_flax_available():
     return _flax_available
 
+def is_mlx_available():
+    return _mlx_available
 
 def is_transformers_available():
     return _transformers_available

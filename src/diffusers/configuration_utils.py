@@ -714,7 +714,6 @@ def flax_register_to_config(cls):
     cls.__init__ = init
     return cls
 
-
 class LegacyConfigMixin(ConfigMixin):
     r"""
     A subclass of `ConfigMixin` to resolve class mapping from legacy classes (like `Transformer2DModel`) to more

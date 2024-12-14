@@ -32,6 +32,7 @@ from .import_utils import (
     is_bitsandbytes_available,
     is_compel_available,
     is_flax_available,
+    is_mlx_available,
     is_note_seq_available,
     is_onnx_available,
     is_opencv_available,
@@ -350,6 +351,14 @@ def require_flax(test_case):
     """
     return unittest.skipUnless(is_flax_available(), "test requires JAX & Flax")(test_case)
 
+
+def require_mlx(test_case):
+    """
+    Decorator marking a test that requires mlx. These tests are skipped when one / both are not installed
+    """
+    return unittest.skipUnless(is_mlx_available(), "test requires MLX")(
+        test_case
+    )
 
 def require_compel(test_case):
     """

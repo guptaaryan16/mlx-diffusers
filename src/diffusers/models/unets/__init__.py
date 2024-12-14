@@ -1,4 +1,4 @@
-from ...utils import is_flax_available, is_torch_available
+from ...utils import is_flax_available, is_torch_available, is_mlx_available
 
 
 if is_torch_available():
@@ -16,3 +16,6 @@ if is_torch_available():
 
 if is_flax_available():
     from .unet_2d_condition_flax import FlaxUNet2DConditionModel
+
+if is_mlx_available():
+    from .unet_2d_condition_mlx import MLXUNet2DConditionModel

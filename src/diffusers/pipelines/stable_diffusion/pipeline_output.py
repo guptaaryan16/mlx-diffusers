@@ -4,7 +4,7 @@ from typing import List, Optional, Union
 import numpy as np
 import PIL.Image
 
-from ...utils import BaseOutput, is_flax_available
+from ...utils import BaseOutput, is_flax_available, is_mlx_available
 
 
 @dataclass
@@ -30,6 +30,25 @@ if is_flax_available():
 
     @flax.struct.dataclass
     class FlaxStableDiffusionPipelineOutput(BaseOutput):
+        """
+        Output class for Flax-based Stable Diffusion pipelines.
+
+        Args:
+            images (`np.ndarray`):
+                Denoised images of array shape of `(batch_size, height, width, num_channels)`.
+            nsfw_content_detected (`List[bool]`):
+                List indicating whether the corresponding generated image contains "not-safe-for-work" (nsfw) content
+                or `None` if safety checking could not be performed.
+        """
+
+        images: np.ndarray
+        nsfw_content_detected: List[bool]
+
+if is_mlx_available():
+    import mlx.core as mx
+    
+    @dataclass
+    class MLXStableDiffusionPipelineOutput(BaseOutput):
         """
         Output class for Flax-based Stable Diffusion pipelines.
 

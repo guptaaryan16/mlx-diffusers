@@ -20,6 +20,7 @@ from ..utils import (
     _LazyModule,
     get_objects_from_module,
     is_flax_available,
+    is_mlx_available,
     is_scipy_available,
     is_torch_available,
     is_torchsde_available,
@@ -99,6 +100,38 @@ else:
         "broadcast_to_shape_from_left",
     ]
 
+try:
+    if not is_mlx_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from ..utils import dummy_mlx_objects  # noqa F403
+
+    _dummy_modules.update(get_objects_from_module(dummy_mlx_objects))
+
+else:
+    _import_structure["scheduling_ddim_mlx"] = ["MLXDDIMScheduler"]
+    _import_structure["scheduling_ddpm_mlx"] = ["MLXDDPMScheduler"]
+    _import_structure["scheduling_euler_discrete_mlx"] = ["MLXEulerDiscreteScheduler"]
+    _import_structure["scheduling_utils_mlx"] = [
+        "MLXKarrasDiffusionSchedulers",
+        "MLXSchedulerMixin",
+        "MLXSchedulerOutput",
+        "broadcast_to_shape_from_left",
+    ]
+
+try:
+    if not is_mlx_available():
+        raise OptionalDependencyNotAvailable()
+
+except OptionalDependencyNotAvailable:
+    from ..utils import dummy_mlx_objects  # noqa F403
+
+    _dummy_modules.update(get_objects_from_module(dummy_mlx_objects))
+
+else:
+    _import_structure["scheduling_euler_discrete_mlx"] = ["MLXEulerDiscreteScheduler"]
+    _import_structure["scheduling_ddpm_mlx"] = ["MLXDDPMScheduler"]
+    _import_structure["scheduling_ddim_mlx"] = ["MLXDDIMScheduler"]
 
 try:
     if not (is_torch_available() and is_scipy_available()):
@@ -127,6 +160,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     from ..utils import (
         OptionalDependencyNotAvailable,
         is_flax_available,
+        is_mlx_available,
         is_scipy_available,
         is_torch_available,
         is_torchsde_available,
@@ -197,6 +231,21 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         )
 
     try:
+        if not is_mlx_available():
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        from ..utils.dummy_mlx_objects import *  # noqa F403
+    else:
+        from .scheduling_ddim_mlx import MLXDDIMScheduler
+        from .scheduling_euler_discrete_mlx import MLXEulerDiscreteScheduler
+        from .scheduling_ddpm_mlx import MLXDDPMScheduler
+        from .scheduling_utils_mlx import (
+            MLXKarrasDiffusionSchedulers,
+            MLXSchedulerMixin,
+            broadcast_to_shape_from_left
+        )
+
+    try:        
         if not (is_torch_available() and is_scipy_available()):
             raise OptionalDependencyNotAvailable()
     except OptionalDependencyNotAvailable:

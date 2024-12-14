@@ -6,6 +6,7 @@ from ...utils import (
     _LazyModule,
     get_objects_from_module,
     is_flax_available,
+    is_mlx_available,
     is_k_diffusion_available,
     is_k_diffusion_version,
     is_onnx_available,
@@ -21,6 +22,10 @@ _import_structure = {"pipeline_output": ["StableDiffusionPipelineOutput"]}
 
 if is_transformers_available() and is_flax_available():
     _import_structure["pipeline_output"].extend(["FlaxStableDiffusionPipelineOutput"])
+
+if is_transformers_available() and is_mlx_available():
+    _import_structure["pipeline_output"].extend(["MLXStableDiffusionPipelineOutput"])
+
 try:
     if not (is_transformers_available() and is_torch_available()):
         raise OptionalDependencyNotAvailable()
@@ -99,6 +104,9 @@ if is_transformers_available() and is_flax_available():
     _import_structure["pipeline_flax_stable_diffusion_img2img"] = ["FlaxStableDiffusionImg2ImgPipeline"]
     _import_structure["pipeline_flax_stable_diffusion_inpaint"] = ["FlaxStableDiffusionInpaintPipeline"]
     _import_structure["safety_checker_flax"] = ["FlaxStableDiffusionSafetyChecker"]
+
+if is_transformers_available() and is_mlx_available():
+    _import_structure["pipline_mlx_stable_diffusion"] = ["MLXStableDiffusionPipeline"]
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     try:
@@ -186,6 +194,15 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pipeline_output import FlaxStableDiffusionPipelineOutput
         from .safety_checker_flax import FlaxStableDiffusionSafetyChecker
 
+
+    try:
+        if not (is_transformers_available() and is_mlx_available()):
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        from ...utils.dummy_mlx_objects import *
+    else:
+        from .pipeline_mlx_stable_diffusion import MLXStableDiffusionPipeline
+        from .pipeline_output import FlaxStableDiffusionPipelineOutput
 else:
     import sys
 

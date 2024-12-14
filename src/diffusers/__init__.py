@@ -7,6 +7,7 @@ from .utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
     is_flax_available,
+    is_mlx_available,
     is_k_diffusion_available,
     is_librosa_available,
     is_note_seq_available,
@@ -36,6 +37,7 @@ _import_structure = {
     "utils": [
         "OptionalDependencyNotAvailable",
         "is_flax_available",
+        "is_mlx_available",
         "is_inflect_available",
         "is_invisible_watermark_available",
         "is_k_diffusion_available",
@@ -547,6 +549,48 @@ else:
     )
 
 try:
+    if not is_mlx_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from .utils import dummy_mlx_objects  # noqa F403
+
+    _import_structure["utils.dummy_mlx_objects"] = [
+        name for name in dir(dummy_mlx_objects) if not name.startswith("_")
+    ]
+
+
+else:
+    _import_structure["schedulers"].extend(
+        [
+            "MLXDDPMScheduler",
+            "MLXEulerDiscreteScheduler",
+            "MLXDDIMScheduler"
+        ]
+    )
+    _import_structure["models.modeling_mlx_utils"] = ["MLXModelMixin"]
+    _import_structure["models.unets.unet_2d_condition_mlx"] = ["MLXUNet2DConditionModel"]
+    _import_structure["models.vae_mlx"] = ["MLXAutoencoderKL"]
+
+try:
+    if not (is_mlx_available() and is_transformers_available()):
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from .utils import dummy_mlx_and_transformers_objects  # noqa F403
+
+    _import_structure["utils.dummy_mlx_and_transformers_objects"] = [
+        name for name in dir(dummy_mlx_and_transformers_objects) if not name.startswith("_")
+    ]
+
+
+else:
+    _import_structure["pipelines"].extend(
+        [
+            "MLXStableDiffusionPipeline",
+        ]
+    )
+
+
+try:
     if not (is_note_seq_available()):
         raise OptionalDependencyNotAvailable()
 except OptionalDependencyNotAvailable:
@@ -978,7 +1022,22 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             FlaxStableDiffusionPipeline,
             FlaxStableDiffusionXLPipeline,
         )
-
+    
+    try:
+        if not is_mlx_available():
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        from .utils.dummy_mlx_objects import *  # noqa F403
+    else:
+        from .models.modeling_mlx_utils import MLXModelMixin
+        from .models.unets.unet_2d_condition_mlx import MLXUNet2DConditionModel
+        from .models.vae_mlx import MLXAutoencoderKL
+        from .schedulers import (
+            MLXDDIMScheduler,
+            MLXDDPMScheduler,
+            MLXEulerDiscreteScheduler
+        )
+    
     try:
         if not (is_note_seq_available()):
             raise OptionalDependencyNotAvailable()

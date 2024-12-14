@@ -108,6 +108,7 @@ _deps = [
     "isort>=5.5.4",
     "jax>=0.4.1",
     "jaxlib>=0.4.1",
+    "mlx",
     "Jinja2",
     "k-diffusion>=0.0.12",
     "torchsde",
@@ -235,8 +236,13 @@ if os.name == "nt":  # windows
 else:
     extras["flax"] = deps_list("jax", "jaxlib", "flax")
 
+if sys.platform == "darwin" and os.uname().machine == "arm64":  # Apple Silicon
+    extras["mlx"] = deps_list("mlx")
+else:
+    extras["mlx"] = []
+
 extras["dev"] = (
-    extras["quality"] + extras["test"] + extras["training"] + extras["docs"] + extras["torch"] + extras["flax"]
+    extras["quality"] + extras["test"] + extras["training"] + extras["docs"] + extras["torch"] + extras["flax"] + extras["mlx"]
 )
 
 install_requires = [

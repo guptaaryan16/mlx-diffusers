@@ -6,6 +6,7 @@ from ..utils import (
     _LazyModule,
     get_objects_from_module,
     is_flax_available,
+    is_mlx_available,
     is_k_diffusion_available,
     is_librosa_available,
     is_note_seq_available,
@@ -423,6 +424,29 @@ else:
     _import_structure["stable_diffusion_xl"].extend(
         [
             "FlaxStableDiffusionXLPipeline",
+        ]
+    )
+
+# try:
+#     if not is_mlx_available():
+#         raise OptionalDependencyNotAvailable()
+# except OptionalDependencyNotAvailable:
+#     from ..utils import dummy_mlx_objects  # noqa F403
+
+#     _dummy_objects.update(get_objects_from_module(dummy_mlx_objects))
+# else:
+#     _import_structure["pipeline_mlx_utils"] = ["MLXDiffusionPipeline"]
+try:
+    if not (is_mlx_available() and is_transformers_available()):
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    from ..utils import dummy_mlx_and_transformers_objects  # noqa F403
+
+    _dummy_objects.update(get_objects_from_module(dummy_mlx_and_transformers_objects))
+else:
+    _import_structure["stable_diffusion"].extend(
+        [
+            "MLXStableDiffusionPipeline",
         ]
     )
 
