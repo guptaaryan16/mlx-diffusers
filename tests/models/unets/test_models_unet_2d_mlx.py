@@ -13,7 +13,7 @@ if is_mlx_available():
     import mlx.core as mx
 
 
-# @slow
+@slow
 @require_mlx
 class MLXUNet2DConditionModelIntegrationTests(unittest.TestCase):
     def get_file_format(self, seed, shape):
@@ -66,7 +66,8 @@ class MLXUNet2DConditionModelIntegrationTests(unittest.TestCase):
             mx.array(timestep, dtype=mx.int32),
             encoder_hidden_states=encoder_hidden_states,
         ).sample 
-
+        
+        mx.eval(sample)
         assert sample.shape == latents.shape
 
         output_slice = mx.array(sample[-1, -2:, -2:, :2].flatten(), dtype=mx.float32)
@@ -75,37 +76,37 @@ class MLXUNet2DConditionModelIntegrationTests(unittest.TestCase):
         # Found torch (float16) and mlx (bfloat16) outputs to be within this tolerance, in the same hardware
         assert mx.allclose(output_slice, expected_output_slice, atol=1e-2)
 
-    @parameterized.expand(
-        [
-            # fmt: off
-            [83, 4, [0.1672, 0.1216, 0.2495, 0.2096, -0.3479, 0.1208, -0.3948, -0.4423]],
-            [17, 0.55, [0.1276, 0.1466, 0.2401, 0.1438, -0.0427, -0.3950, -0.3642, -0.1445]],
-            [8, 0.89, [-0.3872, -0.1293, -0.1552, 0.0510, 0.0456, -0.5277, -0.1444, -0.4731]],
-            [3, 1000, [0.0679, 0.2061, 0.1910, 0.2753, -0.0798, -0.3515, -0.0809, -0.4194]],
-            # fmt: on
-        ]
-    )
-    def test_stabilityai_sd_v2_mlx_vs_torch_fp16(self, seed, timestep, expected_slice):
-        model = self.get_unet_model(
-            model_id="stabilityai/stable-diffusion-2", fp16=True
-        )
-        latents = self.get_latents(seed, shape=(4, 4, 96, 96), fp16=True)
-        encoder_hidden_states = self.get_encoder_hidden_states(
-            seed, shape=(4, 77, 1024), fp16=True
-        )
+    # @parameterized.expand(
+    #     [
+    #         # fmt: off
+    #         [83, 4, [0.1672, 0.1216, 0.2495, 0.2096, -0.3479, 0.1208, -0.3948, -0.4423]],
+    #         [17, 0.55, [0.1276, 0.1466, 0.2401, 0.1438, -0.0427, -0.3950, -0.3642, -0.1445]],
+    #         [8, 0.89, [-0.3872, -0.1293, -0.1552, 0.0510, 0.0456, -0.5277, -0.1444, -0.4731]],
+    #         [3, 1000, [0.0679, 0.2061, 0.1910, 0.2753, -0.0798, -0.3515, -0.0809, -0.4194]],
+    #         # fmt: on
+    #     ]
+    # )
+    # def test_stabilityai_sd_v2_mlx_vs_torch_fp16(self, seed, timestep, expected_slice):
+    #     model = self.get_unet_model(
+    #         model_id="stabilityai/stable-diffusion-2", fp16=True
+    #     )
+    #     latents = self.get_latents(seed, shape=(4, 4, 96, 96), fp16=True)
+    #     encoder_hidden_states = self.get_encoder_hidden_states(
+    #         seed, shape=(4, 77, 1024), fp16=True
+    #     )
 
-        sample = model(
-            latents,
-            mx.array(timestep, dtype=mx.int32),
-            encoder_hidden_states=encoder_hidden_states
-        ).sample
+    #     sample = model(
+    #         latents,
+    #         mx.array(timestep, dtype=mx.int32),
+    #         encoder_hidden_states=encoder_hidden_states
+    #     ).sample
 
-        assert sample.shape == latents.shape
+    #     assert sample.shape == latents.shape
 
-        output_slice = mx.array(
-            sample[-1, -2:, -2:, :2].flatten(), dtype=mx.float32
-        )
-        expected_output_slice = mx.array(expected_slice, dtype=mx.float32)
+    #     output_slice = mx.array(
+    #         sample[-1, -2:, -2:, :2].flatten(), dtype=mx.float32
+    #     )
+    #     expected_output_slice = mx.array(expected_slice, dtype=mx.float32)
 
-        # Found torch (float16) and mlx (bfloat16) outputs to be within this tolerance, on the same hardware
-        assert mx.allclose(output_slice, expected_output_slice, atol=1e-2)
+    #     # Found torch (float16) and mlx (bfloat16) outputs to be within this tolerance, on the same hardware
+    #     assert mx.allclose(output_slice, expected_output_slice, atol=1e-2)

@@ -297,7 +297,7 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
         # out
         if norm_num_groups is not None:
             self.conv_norm_out = nn.GroupNorm(
-                dims=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps
+                dims=block_out_channels[0], num_groups=norm_num_groups, pytorch_compatible=True, eps=norm_eps
             )
 
         else:
@@ -428,8 +428,9 @@ class MLXUNet2DConditionModel(MLXModelMixin, ConfigMixin):
                 sample = up_block(sample, temb=t_emb, res_hidden_states_tuple=res_samples)
            
         # 6. post-process
-        sample = self.conv_norm_out(sample)
-        sample = nn.silu(sample)
+        if self.conv_norm_out:
+            sample = self.conv_norm_out(sample)
+            sample = nn.silu(sample)
         sample = self.conv_out(sample)
         sample = mx.transpose(sample, (0, 3, 1, 2))
 

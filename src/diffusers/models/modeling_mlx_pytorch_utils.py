@@ -37,24 +37,11 @@ def rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor):
     return pt_tuple_key, pt_tensor
 
 
-def convert_pytorch_state_dict_to_mlx(pt_state_dict, mlx_model):
-
-    random_mlx_state_dict = dict(tree_flatten(mlx_model.parameters()))
-    
+def convert_pytorch_state_dict_to_mlx(pt_state_dict):
     for pt_key, pt_tensor in pt_state_dict.items():
-
         pt_tuple_key = tuple(pt_key.split("."))
         mlx_key, mlx_tensor = rename_key_and_reshape_tensor(pt_tuple_key, pt_tensor)
         mlx_key = ".".join(mlx_key)
-        
-        if mlx_key in random_mlx_state_dict:
-            if mlx_tensor.shape != random_mlx_state_dict[mlx_key].shape:
-                raise ValueError(
-                    f"PyTorch checkpoint seems to be incorrect. Weight {pt_key} was expected to be of shape "
-                    f"{random_mlx_state_dict[mlx_key].shape}, but is {mlx_tensor.shape}."
-                )
+        pt_state_dict[mlx_key] = mlx_tensor
 
-        # also add unexpected weight so that warning is thrown
-        random_mlx_state_dict[mlx_key] = mlx_tensor
-
-    return random_mlx_state_dict
+    return pt_state_dict

@@ -25,7 +25,7 @@ import math
 from ..configuration_utils import ConfigMixin, register_to_config
 from ..utils import BaseOutput
 from .modeling_mlx_utils import MLXModelMixin
-from .resnet_mlx import MLXResnetBlock2D, MLXUpsample2D, MLXDownsample2D, upsample_nearest
+from .resnet_mlx import MLXResnetBlock2D, MLXUpsample2D, MLXDownsample2D
 
 @dataclass
 class MLXDecoderOutput(BaseOutput):
@@ -110,6 +110,7 @@ class MLXDownEncoderBlock2D(nn.Module):
         out_channels: int,
         num_layers: int = 1,
         resnet_groups: int = 32,
+        output_scale_factor: float = 1.0,
         add_downsample: bool = True
     ):
         super().__init__()
@@ -122,6 +123,7 @@ class MLXDownEncoderBlock2D(nn.Module):
                 in_channels=in_channels,
                 out_channels=out_channels,
                 groups=resnet_groups,
+                output_scale_factor=output_scale_factor
             )
             resnets.append(res_block)
         self.resnets = resnets
@@ -133,6 +135,8 @@ class MLXDownEncoderBlock2D(nn.Module):
         
         for resnet in self.resnets:
             hidden_states = resnet(hidden_states)
+            
+        
         if self.add_downsample:
             hidden_states = mx.pad(hidden_states, [(0, 0), (0, 1), (0, 1), (0, 0)])
             hidden_states = self.downsamplers[0](hidden_states)
@@ -189,8 +193,7 @@ class MLXUpDecoderBlock2D(nn.Module):
             hidden_states = resnet(hidden_states)
 
         if self.add_upsample:
-            hidden_states = self.upsamplers[0](upsample_nearest(hidden_states))
-
+            hidden_states = self.upsamplers[0](hidden_states)
         return hidden_states
 
 
@@ -600,6 +603,7 @@ class MLXAutoencoderKL(MLXModelMixin, ConfigMixin):
     def __call__(
         self,
         sample,
+        key = 0,
         sample_posterior=False,
         deterministic: bool = True,
         return_dict: bool = True,
@@ -608,12 +612,11 @@ class MLXAutoencoderKL(MLXModelMixin, ConfigMixin):
             sample, deterministic=deterministic, return_dict=return_dict
         )
         if sample_posterior:
-            rng = mx.random.normal()
+            rng = mx.random.seed(key)
             hidden_states = posterior.latent_dist.sample(rng)
         else:
             hidden_states = posterior.latent_dist.mode()
         sample = self.decode(hidden_states, return_dict=return_dict).sample
-
         if not return_dict:
             return (sample,)
 

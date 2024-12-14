@@ -77,6 +77,7 @@ class MLXResnetBlock2D(nn.Module):
         out_channels: Optional[int] = None,
         temb_channels: Optional[int] = None,
         groups: int = 32,
+        output_scale_factor: float = 1.0,
     ):
         self.temb_channels = temb_channels
         out_channels = (
@@ -84,7 +85,7 @@ class MLXResnetBlock2D(nn.Module):
         )
 
         self.norm1 = nn.GroupNorm(
-            num_groups=groups, dims=in_channels, pytorch_compatible=True
+            num_groups=groups, dims=in_channels,  pytorch_compatible=True
         )
         self.conv1 = nn.Conv2d(
             in_channels,
@@ -111,28 +112,27 @@ class MLXResnetBlock2D(nn.Module):
         self.conv_shortcut = None
         if in_channels != out_channels:
             self.conv_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        self.output_scale_factor = output_scale_factor
 
     def __call__(self, hidden_states, temb=None):
         temb = hidden_states if temb is None else temb
-        
+
         if self.temb_channels is not None:
             temb = self.time_emb_proj(nn.silu(temb))
         
         residual = hidden_states
-
         hidden_states = self.norm1(hidden_states)
-   
+        
         hidden_states = nn.silu(hidden_states)
         hidden_states = self.conv1(hidden_states)
-        
         if self.temb_channels is not None:
             hidden_states = hidden_states + temb[:, None, None, :]
-
+        
         hidden_states = self.norm2(hidden_states)
         hidden_states = nn.silu(hidden_states)
         hidden_states = self.conv2(hidden_states)
-
+        
         if self.conv_shortcut is not None:
-            hidden_states = hidden_states + self.conv_shortcut(residual)
-
+            residual = self.conv_shortcut(residual)  
+        hidden_states = (hidden_states + residual) / self.output_scale_factor
         return hidden_states

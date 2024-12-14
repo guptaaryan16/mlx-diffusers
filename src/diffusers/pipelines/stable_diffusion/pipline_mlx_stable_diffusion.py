@@ -88,7 +88,6 @@ class MLXStableDiffusionPipeline:
             raise ValueError(
                 f"`prompt` has to be of type `str` or `list` but is {type(prompt)}"
             )
-
         text_input = self.tokenizer(
             prompt,
             padding="max_length",
@@ -131,7 +130,7 @@ class MLXStableDiffusionPipeline:
     def _generate(
         self,
         prompt_ids: np.array,
-        prng_seed: mx.array,
+        prng_seed: int,
         num_inference_steps: int,
         height: int,
         width: int,
@@ -148,7 +147,7 @@ class MLXStableDiffusionPipeline:
             )
 
         # get prompt text embeddings
-        prompt_embeds = mx.array(self.text_encoder(torch.tensor(prompt_ids))[0].detach().numpy()).astype(self.dtype)
+        prompt_embeds = mx.array(self.text_encoder(prompt_ids)[0]).astype(self.dtype)
 
         # TODO: currently it is assumed `do_classifier_free_guidance = guidance_scale > 1.0`
         # implement this conditional `do_classifier_free_guidance = guidance_scale > 1.0`
@@ -161,13 +160,13 @@ class MLXStableDiffusionPipeline:
                 [""] * batch_size,
                 padding="max_length",
                 max_length=max_length,
-                return_tensors="pt",
+                return_tensors="np",
             ).input_ids
         else:
             uncond_input = neg_prompt_ids
         negative_prompt_embeds = mx.array(self.text_encoder(
             uncond_input
-        )[0].detach().numpy()).astype(self.dtype)
+        )[0]).astype(self.dtype)
         context = mx.concatenate([negative_prompt_embeds, prompt_embeds])
 
         # Ensure model output will be `float32` before going into the scheduler
@@ -201,12 +200,12 @@ class MLXStableDiffusionPipeline:
             latents_input = self.scheduler.scale_model_input(
                 latents_input, t
             )
-
+            
             # predict the noise residual
             noise_pred = self.unet(
-                mx.array(latents_input),
-                mx.array(timestep, dtype=mx.int32),
-                encoder_hidden_states=context,
+                latents_input,
+                timestep,
+                context
             ).sample
   
             # perform guidance
@@ -229,49 +228,30 @@ class MLXStableDiffusionPipeline:
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
         num_warmup_steps = len(self.scheduler.timesteps) - num_inference_steps * self.scheduler.order
-
-        num_inference_steps = 10
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             
             for i in range(num_inference_steps):
                 latents = loop_body(i, latents)
                 mx.eval(latents)
-
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
-
                 # call the callback, if provided
                 if i == len(self.scheduler.timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
 
 
         # scale and decode the image latents with vae
         latents = 1 / self.vae.config.scaling_factor * latents
-        # Lets clear the memory for unet and scheduler
-        #del self.unet
-        mx.save("/Users/guptaaryan16/Desktop/OSS/diffusers/latents.npy", latents)
-        raise Exception("Error")
+
         image = self.vae.decode(
             latents
         ).sample
-
+        
         image = mx.transpose(mx.clip((image / 2 + 0.5), 0, 1), (0, 2, 3, 1))
-        return np.array(image.astype(mx.uint8))
+        return image
 
     def __call__(
         self,
         prompt_ids: np.array,
-        prng_seed: mx.array,
+        prng_seed: int = 0,
         num_inference_steps: int = 50,
         height: Optional[int] = None,
         width: Optional[int] = None,

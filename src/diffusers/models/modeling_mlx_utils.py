@@ -260,7 +260,7 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
         if from_pt:
             # Step 1: Get the pytorch file
             state = dict(mx.load(model_file))
-            state = convert_pytorch_state_dict_to_mlx(state, model)
+            state = convert_pytorch_state_dict_to_mlx(state)
         else:
             state = dict(mx.load(model_file))
         
@@ -317,10 +317,9 @@ class MLXModelMixin(nn.Module, PushToHubMixin):
                 f" was trained on, you can already use {model.__class__.__name__} for predictions without further"
                 " training."
             ),
-        state = [(k, v.astype(dtype)) for k,v in state.items()] 
-        model.update(tree_unflatten(state))
-        
-        # Eval the weights due to lazy loading in SAFETENSORS
+        model.update(tree_unflatten([(k, v.astype(dtype)) for k,v in state.items()]))
+
+        # Eval the weights due to lazy loading in mlx
         mx.eval(model.parameters())
         model.eval()
 
